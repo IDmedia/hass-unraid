@@ -11,4 +11,4 @@ services:
       - './data:/data'
     labels:
       - 'net.unraid.docker.icon=/mnt/user/docker/docker-icons/data/hass-unraid.png'
-    image: registry.idmedia.no/idmedia/docker/hass-unraid:latest
+    image: ghcr.io/idmedia/hass-unraid:latest
