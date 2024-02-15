@@ -6,6 +6,16 @@
 # Unraid to Home Assistant
 This Docker container parses and forwards all WebSocket messages from your Unraid server to Home Assistant using the MQTT protocol. This enables you to create dashboards that provide a superior overview compared to Unraid's native capabilities.
 
+# Featureså
+1. Historical data is crucial! I aimed to monitor CPU, RAM, and other attributes over time. Maybe most importantly know how often and when disks spin up in order to debug the cause easier.
+
+2. This integration enables Unraid automations via Home Assistant. You can receive notifications for disk space running low, fan failures, and more.
+
+3. The custom view I developed greatly enhances locating disks within the array. A disk's color changes from grey (spin-down) to yellow to red if it overheats, and warnings are displayed for disks with issues. It also has a notification when disk scrubbing is running.
+
+4. Instantly identify which shares are on which disks and how full the disk is.
+
+5. The "network-share" view in Home Assistant is much more intuitive than Unraid's "shares" tab, in my opinion.
 
 <div align="center">
   <img src="extras/screenshot.png" width="250" alt="screenshot">
