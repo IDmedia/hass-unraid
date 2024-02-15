@@ -1,0 +1,179 @@
+button_unraid_disk:
+  variables:
+    connectivity_entity: ''
+
+    max_temp_normal_ata: 40
+    max_temp_warning_ata: 45
+    max_temp_normal_nvme: 50
+    max_temp_warning_nvme: 60
+
+    color_disk_empty: 'transparent'
+    color_disk_standby: '#D2D2D2'
+    color_disk_unavailable: '#F2F2F2'
+    color_disk_eror: '#FF4E11'
+    color_temp_normal: '#69B34C'
+    color_temp_warning: '#FAB733'
+    color_temp_critical: '#FF4E11'
+
+  show_icon: false
+  tap_action:
+    action: >
+      [[[
+        return (entity.attributes.transport) ? 'more-info' : 'none';
+      ]]]
+  styles:
+    card:
+      - padding: 0
+      - padding-top: 2px
+      - color: '#000'
+      - font-size: 1em
+      - border-radius: unset
+      - --mdc-ripple-color: none
+      - background-color: >
+          [[[
+            // Server is offline
+            if (variables.connectivity_entity !== '' && isNaN(states[variables.connectivity_entity].state)) {
+               return variables.color_disk_unavailable;
+            }
+          
+            // Define temperature ranges
+            let activeTempRange = [variables.max_temp_normal_ata, variables.max_temp_warning_ata]
+            
+            if (entity.attributes.transport === 'nvme') {
+              activeTempRange = [variables.max_temp_normal_nvme, variables.max_temp_warning_nvme]
+            }
+            
+            // Parse state and change background-color accordingly
+            if (entity.state == 0 && entity.attributes.size == 0) return variables.color_disk_empty;
+            else if (entity.attributes.color && !entity.attributes.color.startsWith('green')) return variables.color_disk_eror;
+            else if (entity.state == 0) return variables.color_disk_standby;
+            else if (entity.state <= activeTempRange[0]) return variables.color_temp_normal;
+            else if (entity.state <= activeTempRange[1]) return variables.color_temp_warning;
+            else return variables.color_temp_critical;
+          ]]]
+    grid:
+      - grid-template-areas: '"icon n temp"
+                              "info info used"
+                              "shares shares shares"
+                              "bar bar bar"'
+      - grid-template-columns: min-content 1fr
+      - grid-template-rows: 1fr
+    name:
+      - justify-self: start
+      - font-weight: 500
+      - color: '#000'
+      - padding-left: 5px
+    custom_fields:
+      icon:
+        - justify-self: start
+        - padding-left: 5px
+        - font-weight: bold
+      temp:
+        - grid-area: temp
+        - justify-self: end
+        - padding-right: 5px
+        - color: '#000'
+        - font-size: 0.8em
+      info:
+        - grid-area: info
+        - justify-self: start
+        - font-size: 0.8em
+        - padding-left: 5px
+        - text-transform: uppercase
+      shares:
+        - grid-area: shares
+        - justify-self: start
+        - font-size: 0.8em
+        - padding: 2px 0 4px 5px
+      used:
+        - grid-area: used
+        - justify-self: end
+        - padding-right: 5px
+        - color: '#000'
+        - font-size: 0.8em        
+      bar:
+        - grid-area: bar
+        - font-size: 0.8em
+        - color: '#fff'
+        - width: 100%
+  custom_fields:
+    icon: >
+      [[[
+          if (entity.attributes.color) {
+            if (entity.attributes.color.startsWith('yellow')) { return '⚠'; }
+            else if (entity.attributes.color.startsWith('red')) { return '✖'; }
+          }
+          else {
+            return '?';
+          }
+      ]]]
+    temp: >
+      [[[
+        if (entity.state !== 'unknown' && entity.attributes.size > 0) return `${entity.state}°C`;
+      ]]]
+    info: >
+      [[[
+        function formatBytes(a,b=2){if(!+a)return"0 Bytes";const c=0>b?0:b,d=Math.floor(Math.log(a)/Math.log(1000));return`${parseFloat((a/Math.pow(1000,d)).toFixed(c))} ${["Bytes", "KB","MB","GB","TB","PB","EB","ZB","YB"][d]}`}
+        
+        let diskSize = formatBytes(entity.attributes.size * 1024, 0);
+        let diskType = (entity.attributes.rotational) ? 'HDD' : 'SSD';
+        let diskTransport = entity.attributes.transport;
+        let diskStatus = (!isNaN(entity.state)) ? 'Empty' : 'Unavailable'
+        let diskInfo = (diskTransport) ? `${diskSize} ${diskType} ${diskTransport}` : diskStatus;
+        
+        return diskInfo;
+      ]]]
+    shares: >
+      [[[
+        let regex = entity.entity_id.match(/disk_(\d+)/g) || [""];
+        let diskId = regex[0].replace("_", "")
+
+        if (!diskId)
+          return '&nbsp;';
+        
+        let serverName = entity.entity_id.substring(entity.entity_id.indexOf(".") + 1, entity.entity_id.indexOf("_"));
+        let diskShares = Object.entries(states)
+                            .filter(([k]) => k.includes(`${serverName}_share`))
+                            .filter(([k, v]) => typeof v.attributes.include !== 'undefined')
+                            .filter(([k, v]) => v.attributes.include.split(',').indexOf(`${diskId}`) !== -1)
+                            .map(([k, v]) => { return v.attributes.nameorig });
+
+        let shares = (diskShares.length > 0) ? diskShares.join(', ') : '&nbsp;';
+        
+        return shares;
+      ]]]
+    used: >
+      [[[
+        if(entity.attributes.fssize) return Math.ceil((100 * entity.attributes.fsused) / entity.attributes.fssize) + '%';
+      ]]]   
+    bar: >
+      [[[
+        let hideProgress;
+        let percentageUsed = -1;
+        let progressColor = variables.color_temp_critical;
+
+        if(entity.attributes.fssize) percentageUsed = Math.ceil((100 * entity.attributes.fsused) / entity.attributes.fssize);
+        if (percentageUsed == -1) hideProgress = "visibility:hidden";
+
+        let activeTempRange = [variables.max_temp_normal_ata, variables.max_temp_warning_ata]
+        if (entity.attributes.transport === 'nvme') {
+          activeTempRange = [variables.max_temp_normal_nvme, variables.max_temp_warning_nvme]
+        }
+        if (entity.state == 0) progressColor = variables.color_disk_standby;
+        else if (entity.state <= activeTempRange[0]) progressColor = variables.color_temp_normal;
+        else if (entity.state <= activeTempRange[1]) progressColor = variables.color_temp_warning;
+        else progressColor = variables.color_temp_critical;
+
+        if (entity.attributes.color && !entity.attributes.color.startsWith('green')) {
+          progressColor = variables.color_disk_eror;
+        }
+
+        // Server is offline
+        if (variables.connectivity_entity !== '' && isNaN(states[variables.connectivity_entity].state)) {
+           progressColor = variables.color_disk_unavailable;
+        }
+        
+        return `<div style="${hideProgress};background-color:${progressColor};filter:brightness(0.90);">
+                  <div style="background-color:${progressColor};filter:brightness(0.70);height:10px;width:${percentageUsed}%"></div>
+                </div>`;
+      ]]]

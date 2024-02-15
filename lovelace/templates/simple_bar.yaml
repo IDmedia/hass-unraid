@@ -1,0 +1,50 @@
+button_simple_bar:
+  show_icon: false
+  show_state: true
+  variables:
+    name_padding: 50px
+    state_padding: 50px
+    max_value: 100
+    warning_from_state: 50
+    critical_from_state: 80
+    bar_color_normal: '#69B34C'
+    bar_color_warning: '#FAB733'
+    bar_color_critical: '#FF4E11'
+    bar_color_background: '#E5E6E8'
+  state_display: >
+    [[[
+      return (isNaN(entity.state)) ? '-' : `${entity.state}${entity.attributes.unit_of_measurement}`;
+    ]]]
+  styles:
+    grid:            
+      - grid-template-areas: '"n bar s"'
+      - grid-template-columns: auto 1fr auto
+      - grid-template-rows: auto
+    card:
+      - color: '#000'
+      - font-size: 1em
+      - margin: 5px 0
+      - padding: 0
+      - border-style: none
+      - --mdc-ripple-color: none
+    name:
+      - text-align: left
+      - min-width: '[[[ return variables.name_padding ]]]'
+    state:
+      - font-weight: 500
+      - text-align: right
+      - min-width: '[[[ return variables.state_padding ]]]'
+  custom_fields:
+    bar: >
+      [[[
+        let pctUsed = (isNaN(entity.state)) ? 100 : (100*(entity.state / variables.max_value));
+        let barColor = variables.bar_color_normal;
+        
+        barColor = (pctUsed > variables.warning_from_state ) ? variables.bar_color_warning : barColor;
+        barColor = (pctUsed > variables.critical_from_state ) ? variables.bar_color_critical : barColor;
+        barColor = (isNaN(entity.state)) ? variables.bar_color_background : barColor;
+        
+        return `<div style="background-color:${variables.bar_color_background}">
+                  <div style="background-color:${barColor};height:10px;width:${pctUsed}%"></div>
+                </div>`;
+      ]]]

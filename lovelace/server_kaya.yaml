@@ -1,0 +1,261 @@
+type: custom:vertical-stack-in-card
+card_mod:
+  style: |
+    ha-card {
+      padding: 10px;
+    }
+    .card-header {
+      padding: 0;
+    }
+cards:
+  - type: custom:vertical-stack-in-card
+    card_mod:
+      style:
+        .: |
+          ha-card { border-style: none !important; }
+        hui-grid-card$: |
+          h1 {
+            padding: 0 !important;
+            line-height: 48px;
+          }
+          #root {
+            grid-template-columns: 100px auto !important;
+            grid-gap: 20px !important;
+            align-items: center;
+            min-height: 130px;
+          }
+          hui-picture-card { align-self: center; }
+    cards:
+      - type: grid
+        title: Kaya
+        columns: 2 
+        cards:
+          - type: picture
+            card_mod:
+              style: |
+                ha-card { border-style: none !important; border-radius: unset !important; }
+            image: /local/norco.svg
+            tap_action:
+              action: none
+          - type: vertical-stack
+            cards:
+              - type: custom:button-card
+                entity: sensor.kaya_cpu_utilization
+                template: button_simple_bar
+                name: CPU
+              - type: custom:button-card
+                entity: sensor.kaya_ram_usage
+                template: button_simple_bar
+                name: RAM
+              - type: custom:button-card
+                entity: sensor.kaya_fan_speed
+                template: button_simple_bar
+                name: FAN
+                variables:
+                  warning_from_state: 80
+                  critical_from_state: 90
+              - type: custom:button-card
+                entity: sensor.kaya_power_power
+                template: button_simple_bar
+                name: PWR
+                variables:
+                  max_value: 500
+                  warning_from_state: 70
+                  critical_from_state: 90
+
+  - type: custom:auto-entities
+    show_empty: false
+    card:
+      type: markdown
+      card_mod:
+        style:
+          .: |
+            ha-card {
+              padding: 0 16px 20px 16px !important;
+              border-style: none !important;
+            }
+            ha-markdown {
+              padding: 0px !important;
+            }
+      content: |
+        <ha-alert alert-type="warning">
+          <strong>Parity-Check in progress</strong><br />
+          Current position: {{ state_attr("sensor.kaya_parity_check", "current_position") | int(0) | filesizeformat() }}
+                            ({{ states("sensor.kaya_parity_check") | float(0)}} %) @ 
+                            {{ state_attr("sensor.kaya_parity_check", "estimated_speed") | int(0) | filesizeformat() }}/sec<br />
+          Estimated finish: {{ state_attr("sensor.kaya_parity_check", "estimated_finish") }}
+        </ha-alert>
+    filter:
+      template: |
+        {% set parity_status = states("sensor.kaya_parity_check") | float(default=-1) %}
+        {% if parity_status >= 0 and parity_status < 100 %}
+          sensor.kaya_parity_check,
+        {% endif %}
+
+  - type: custom:auto-entities
+    card:
+      type: grid
+      columns: 4
+      square: false
+    card_param: cards
+    filter:
+      template: >-
+        {% set disk_order = [
+            'sensor.kaya_disk_parity',
+            'sensor.kaya_disk_parity_2',
+            'sensor.kaya_disk_cache_array',  
+            'sensor.kaya_disk_cache_array_2',
+            'sensor.kaya_disk_1',
+            'sensor.kaya_disk_2',
+            'sensor.kaya_disk_3',
+            'sensor.kaya_disk_4',
+            'sensor.kaya_disk_5',
+            'sensor.kaya_disk_6',
+            'sensor.kaya_disk_7',
+            'sensor.kaya_disk_8',
+            'sensor.kaya_disk_9',
+            'sensor.kaya_disk_10',
+            'sensor.kaya_disk_11',
+            'sensor.kaya_disk_12',
+            'sensor.kaya_disk_13',
+            'sensor.kaya_disk_14',
+            'sensor.kaya_disk_15',
+            'sensor.kaya_disk_16',
+            'sensor.kaya_disk_17',
+            'sensor.kaya_disk_18',
+            'sensor.kaya_disk_19',
+            'sensor.kaya_disk_20',
+          ] 
+        %}
+
+        {% set ns = namespace(disk_array=[])%}
+        {% for disk in disk_order %}
+          {% set ns.disk_array = ns.disk_array + expand(disk) %}
+        {% endfor %}
+
+        {%- for disk in ns.disk_array -%}
+        {{
+          {
+            'type': 'custom:button-card',
+            'entity': disk.entity_id,
+            'template': 'button_unraid_disk',
+            'variables': {
+              'connectivity_entity': 'sensor.kaya_cpu_utilization'
+            },
+            'name': disk.attributes.friendly_name | replace("Kaya", "") | replace("Disk Parity", "Parity") | replace("Disk Cache Array", "Cache")
+          }
+        }},
+        {%- endfor %}
+
+  - type: custom:auto-entities
+    card:
+      type: grid
+      columns: 2
+      square: false
+    card_param: cards
+    filter:
+      template: >-
+        {% set disk_order = [
+            'sensor.kaya_disk_cache_docker',
+            'sensor.kaya_disk_cache_docker_2',
+          ]
+        %}
+
+        {% set ns = namespace(disk_array=[])%}
+        {% for disk in disk_order %}
+          {% set ns.disk_array = ns.disk_array + expand(disk) %}
+        {% endfor %}
+
+        {%- for disk in ns.disk_array -%}
+        {{
+          {
+            'type': 'custom:button-card',
+            'entity': disk.entity_id,
+            'template': 'button_unraid_disk',
+            'variables': {
+              'connectivity_entity': 'sensor.kaya_cpu_utilization'
+            },
+            'card_mod': {
+              'style': 'ha-card { margin-top: 15px; }'
+            },
+            'name': disk.attributes.friendly_name | replace("Disk Parity", "Parity") | replace("Disk Cache", "Cache") | replace("Kaya", "") | trim
+          }
+        }},
+        {%- endfor %}
+
+  - type: custom:auto-entities
+    card:
+      type: grid
+      columns: 2
+      square: false
+    card_param: cards
+    filter:
+      template: >-
+        {% set disk_order = [
+            'sensor.kaya_disk_cache_system',
+            'sensor.kaya_disk_cache_system_2',
+          ]
+        %}
+
+        {% set ns = namespace(disk_array=[])%}
+        {% for disk in disk_order %}
+          {% set ns.disk_array = ns.disk_array + expand(disk) %}
+        {% endfor %}
+
+        {%- for disk in ns.disk_array -%}
+        {{
+          {
+            'type': 'custom:button-card',
+            'entity': disk.entity_id,
+            'template': 'button_unraid_disk',
+            'variables': {
+              'connectivity_entity': 'sensor.kaya_cpu_utilization'
+            },
+            'card_mod': {
+              'style': 'ha-card { margin-top: 15px; }'
+            },
+            'name': disk.attributes.friendly_name | replace("Disk Parity", "Parity") | replace("Disk Cache", "Cache") | replace("Kaya", "") | trim
+          }
+        }},
+        {%- endfor %}
+        
+  - type: custom:vertical-stack-in-card
+    title: Shares
+    card_mod:
+      style:
+        .: |
+          ha-card {
+            padding: 10px 0;
+            border-style: none !important;
+          }
+        $: |
+          .card-header {
+            padding: 0 !important;
+            line-height: 48px;
+          }
+    cards:
+      - type: custom:auto-entities
+        card:
+          type: grid
+          columns: 3
+          square: false
+        card_param: cards
+        filter:
+          template: >-
+            {% set share_list = states.sensor
+               | selectattr('entity_id','search', 'kaya_share')
+               | rejectattr('attributes.nameorig', 'in', ['appdata', 'backup', 'system', 'vms'])
+               | sort(reverse=true,attribute='state')
+               | map(attribute='entity_id')
+               | list
+            %}
+
+            {%- for share in share_list -%}
+            {{
+              {
+                'type': 'custom:button-card',
+                'template': 'button_network_share',
+                'entity': share,
+              }
+            }},
+            {%- endfor %}

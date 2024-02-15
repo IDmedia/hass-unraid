@@ -1,0 +1,14 @@
+version: '3'
+
+services:
+  hass-unraid:
+    container_name: hass-unraid
+    network_mode: bridge
+    restart: always
+    environment:
+      - TZ=Europe/Oslo
+    volumes:
+      - './data:/data'
+    labels:
+      - 'net.unraid.docker.icon=/mnt/user/docker/docker-icons/data/hass-unraid.png'
+    image: registry.idmedia.no/idmedia/docker/hass-unraid:latest
