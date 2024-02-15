@@ -28,16 +28,16 @@ docker-build:
 
   before_script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login --username $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
-    - echo "$DOCKERHUB_PASSWORD" | docker login --username $DOCKERHUB_USERNAME --password-stdin
+    - echo "$GHCR_PASSWORD" | docker login --username $GHCR_USERNAME --password-stdin ghcr.io
   script:
     - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG -t $CI_REGISTRY_IMAGE:latest .
     - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
     - docker push $CI_REGISTRY_IMAGE:latest
 
-    # Pushing to Docker Hub
-    - docker tag $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG $DOCKERHUB_USERNAME/$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
-    - docker tag $CI_REGISTRY_IMAGE:latest $DOCKERHUB_USERNAME/$CI_REGISTRY_IMAGE:latest
-    - docker push $DOCKERHUB_USERNAME/$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
-    - docker push $DOCKERHUB_USERNAME/$CI_REGISTRY_IMAGE:latest
+    # Pushing to GitHub Container Registry (ghcr.io)
+    - docker tag $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG ghcr.io/$GHCR_USERNAME/$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
+    - docker tag $CI_REGISTRY_IMAGE:latest ghcr.io/$GHCR_USERNAME/$CI_REGISTRY_IMAGE:latest
+    - docker push ghcr.io/$GHCR_USERNAME/$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
+    - docker push ghcr.io/$GHCR_USERNAME/$CI_REGISTRY_IMAGE:latest
   only:
     - tags
