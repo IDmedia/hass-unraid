@@ -34,10 +34,10 @@ docker-build:
     - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
     - docker push $CI_REGISTRY_IMAGE:latest
 
-    # Pushing to GitHub Container Registry (ghcr.io)
-    - docker tag $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG ghcr.io/$GHCR_USERNAME/$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
-    - docker tag $CI_REGISTRY_IMAGE:latest ghcr.io/$GHCR_USERNAME/$CI_REGISTRY_IMAGE:latest
-    - docker push ghcr.io/$GHCR_USERNAME/$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
-    - docker push ghcr.io/$GHCR_USERNAME/$CI_REGISTRY_IMAGE:latest
+    # Tagging and Pushing to GitHub Container Registry (ghcr.io)
+    - docker tag $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG ghcr.io/$GHCR_USERNAME/hass-unraid:$CI_COMMIT_TAG
+    - docker tag $CI_REGISTRY_IMAGE:latest ghcr.io/$GHCR_USERNAME/hass-unraid:latest
+    - docker push ghcr.io/$GHCR_USERNAME/hass-unraid:$CI_COMMIT_TAG
+    - docker push ghcr.io/$GHCR_USERNAME/hass-unraid:latest
   only:
     - tags
