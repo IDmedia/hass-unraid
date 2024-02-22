@@ -90,13 +90,26 @@ The container should now connect to your Unraid server(s) and automatically crea
 
 ## Lovelace
 
+Please check out the `lovelace` folder. That's where I've placed two button-card templates and the main setup for showing the server named `Kaya` just like you see in the screenshot.
+
 This lovelace example is a bit complex and requires these modules in Home Assistant to work properly:
  * [button-card](https://github.com/custom-cards/button-card)
  * [vertical-stack-in-card](https://github.com/ofekashery/vertical-stack-in-card)
  * [auto-entities](https://github.com/thomasloven/lovelace-auto-entities)
+ * [card-mod](https://github.com/thomasloven/lovelace-card-mod)
 
 
-Please check out the `lovelace` folder. That's where I've placed two button-card templates and the main setup for showing the server named `Kaya` just like you see in the screenshot.
+Copy the button_card templates from `/lovelace/templates/` into `/config/lovelace/templates/button_card/`:
+```
+network_share.yaml
+simple_bar.yaml
+unraid_disk.yaml
+```
+
+Ensure button-card locates the templates by adding the following line to the top of your ui-lovelace.yaml file:
+```
+button_card_templates: !include_dir_merge_named lovelace/templates/button_card
+```
 
 
 ### Feel free to contribute, report issues, or suggest improvements! If you find this repository useful, don't forget to star it :)
