@@ -1,0 +1,5 @@
+template:
+  - sensor:
+      - name: "Kaya Fan Speed"
+        unit_of_measurement: "%"
+        state: "{{ ([0, (100 * int(states('sensor.kaya_fan_1_speed')) / 2060) | round(0), 100]|sort)[1] }}"
