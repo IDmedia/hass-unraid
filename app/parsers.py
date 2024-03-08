@@ -184,6 +184,10 @@ def temperature(self, msg_data, create_config):
                 device_name = re.sub('fan', '', device_name, flags=re.IGNORECASE).strip()
                 device_value = int(device_value)
 
+                # Let's align the fan numbering with the Unraid UI by adjusting it
+                if device_name.isdigit():
+                    device_name = str(int(device_name) + 1)
+
                 payload = {
                     'name': f'Fan {device_name} Speed',
                     'unit_of_measurement': 'RPM',
