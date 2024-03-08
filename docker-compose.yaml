@@ -5,6 +5,7 @@ services:
     container_name: hass-unraid
     network_mode: bridge
     restart: always
+    # build: ./
     environment:
       - TZ=Europe/Oslo
     volumes:

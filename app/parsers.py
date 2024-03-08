@@ -184,10 +184,6 @@ def temperature(self, msg_data, create_config):
                 device_name = re.sub('fan', '', device_name, flags=re.IGNORECASE).strip()
                 device_value = int(device_value)
 
-                # Let's align the fan numbering with the Unraid UI by adjusting it
-                if device_name.isdigit():
-                    device_name = str(int(device_name) + 1)
-
                 payload = {
                     'name': f'Fan {device_name} Speed',
                     'unit_of_measurement': 'RPM',
@@ -227,6 +223,7 @@ def update1(self, msg_data, create_config):
             self.mqtt_publish(payload, 'sensor', memory_value, create_config=create_config)
 
     for fan_id, fan_rpm in enumerate(re.findall(re.compile(r'(\d+ RPM)'), msg_data)):
+        fan_id = fan_id + 1
         fan_name = f'Fan {fan_id}'
         fan_value = ''.join(c for c in fan_rpm if c.isdigit())
 
