@@ -6,7 +6,7 @@
 # Unraid to Home Assistant
 This Docker container parses and forwards all WebSocket messages from your Unraid server to Home Assistant using the MQTT protocol. This enables you to create dashboards that provide a superior overview compared to Unraid's native capabilities.
 
-# Featureså
+# Features
 1. Historical data is crucial! I aimed to monitor CPU, RAM, and other attributes over time. Maybe most importantly know how often and when disks spin up in order to debug the cause easier.
 
 2. This integration enables Unraid automations via Home Assistant. You can receive notifications for disk space running low, fan failures, and more.
