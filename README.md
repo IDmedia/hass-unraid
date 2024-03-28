@@ -44,7 +44,7 @@ unraid:
   - name: Hisa
     host: 192.168.1.20
     port: 80
-    ssl: false
+    ssl: False
     username: root
     password: PASSWORD
     scan_interval: 30
