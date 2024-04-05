@@ -36,7 +36,7 @@ unraid:
   - name: Kaya
     host: 192.168.1.10
     port: 80
-    ssl: false
+    ssl: False
     username: root
     password: PASSWORD
     scan_interval: 30
