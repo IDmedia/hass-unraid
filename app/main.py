@@ -15,7 +15,7 @@ from gmqtt import Client as MQTTClient, Message
 
 
 class UnRAIDServer(object):
-    def __init__(self, mqtt_config, unraid_config):
+    def __init__(self, mqtt_config, unraid_config, loop: asyncio.AbstractEventLoop):
         # Unraid config
         unraid_host = unraid_config.get('host')
         unraid_port = unraid_config.get('port')
@@ -49,6 +49,8 @@ class UnRAIDServer(object):
         unraid_logger_formatter = logging.Formatter(f'%(asctime)s [%(levelname)s] [{self.unraid_name}] %(message)s')
         unraid_logger.setFormatter(unraid_logger_formatter)
         self.logger.addHandler(unraid_logger)
+
+        self.loop = loop
 
     def on_connect(self, client, flags, rc, properties):
         self.logger.info('Successfully connected to mqtt server')
@@ -237,13 +239,13 @@ class UnRAIDServer(object):
                         if sub_channel not in self.mqtt_history:
                             self.logger.info(f'Create config for {sub_channel}')
                             self.mqtt_history[sub_channel] = (time.time() - self.scan_interval)
-                            await msg_parser(self, msg_data, create_config=True)
+                            self.loop.create_task(msg_parser(self, msg_data, create_config=True))
 
                         # Parse content
                         if self.scan_interval <= (time.time() - self.mqtt_history.get(sub_channel, time.time())):
                             self.logger.info(f'Parse data for {sub_channel}')
                             self.mqtt_history[sub_channel] = time.time()
-                            await msg_parser(self, msg_data, create_config=False)
+                            self.loop.create_task(msg_parser(self, msg_data, create_config=False))
 
             except (httpx.ConnectTimeout, httpx.ConnectError):
                 self.logger.error('Failed to connect to unraid due to a timeout or connection issue...')
@@ -280,7 +282,7 @@ if __name__ == '__main__':
 
     # Create unraid instances
     for unraid_config in config.get('unraid'):
-        UnRAIDServer(config.get('mqtt'), unraid_config)
+        UnRAIDServer(config.get('mqtt'), unraid_config, loop)
 
     # Loop forever
     loop.run_forever()
