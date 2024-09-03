@@ -237,13 +237,13 @@ class UnRAIDServer(object):
                         if sub_channel not in self.mqtt_history:
                             self.logger.info(f'Create config for {sub_channel}')
                             self.mqtt_history[sub_channel] = (time.time() - self.scan_interval)
-                            msg_parser(self, msg_data, create_config=True)
+                            await msg_parser(self, msg_data, create_config=True)
 
                         # Parse content
                         if self.scan_interval <= (time.time() - self.mqtt_history.get(sub_channel, time.time())):
                             self.logger.info(f'Parse data for {sub_channel}')
                             self.mqtt_history[sub_channel] = time.time()
-                            msg_parser(self, msg_data, create_config=False)
+                            await msg_parser(self, msg_data, create_config=False)
 
             except (httpx.ConnectTimeout, httpx.ConnectError):
                 self.logger.error('Failed to connect to unraid due to a timeout or connection issue...')

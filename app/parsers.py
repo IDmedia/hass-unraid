@@ -6,15 +6,15 @@ from utils import Preferences
 from humanfriendly import parse_size
 
 
-def default(self, msg_data, create_config):
+async def default(self, msg_data, create_config):
     pass
 
 
-def session(self, msg_data, create_config):
+async def session(self, msg_data, create_config):
     self.csrf_token = msg_data
 
 
-def cpuload(self, msg_data, create_config):
+async def cpuload(self, msg_data, create_config):
     prefs = Preferences(msg_data)
     state_value = int(prefs.as_dict()['cpu']['host'])
 
@@ -28,7 +28,7 @@ def cpuload(self, msg_data, create_config):
     self.mqtt_publish(payload, 'sensor', state_value, create_config=create_config)
 
 
-def disks(self, msg_data, create_config):
+async def disks(self, msg_data, create_config):
     prefs = Preferences(msg_data)
     disks = prefs.as_dict()
 
@@ -57,7 +57,7 @@ def disks(self, msg_data, create_config):
         self.mqtt_publish(payload, 'sensor', disk_temp, json_attributes, create_config=create_config, retain=True)
 
 
-def shares(self, msg_data, create_config):
+async def shares(self, msg_data, create_config):
     prefs = Preferences(msg_data)
     shares = prefs.as_dict()
 
@@ -169,7 +169,7 @@ def shares(self, msg_data, create_config):
         self.mqtt_publish(payload, 'sensor', share_used_pct, json_attributes, create_config=create_config, retain=True)
 
 
-def temperature(self, msg_data, create_config):
+async def temperature(self, msg_data, create_config):
     tree = etree.HTML(msg_data)
     sensors = tree.xpath('.//span[@title]')
 
@@ -205,7 +205,7 @@ def temperature(self, msg_data, create_config):
             self.mqtt_publish(payload, 'sensor', device_value, create_config=create_config)
 
 
-def update1(self, msg_data, create_config):
+async def update1(self, msg_data, create_config):
     memory_categories = ['RAM', 'Flash', 'Log', 'Docker']
     for (memory_name, memory_usage) in zip(memory_categories, re.findall(re.compile(r'(\d+%)'), msg_data)):
         memory_value = ''.join(c for c in memory_usage if c.isdigit())
@@ -240,7 +240,7 @@ def update1(self, msg_data, create_config):
             self.mqtt_publish(payload, 'sensor', fan_value, create_config=create_config)
 
 
-def update3(self, msg_data, create_config):
+async def update3(self, msg_data, create_config):
     network_download = 0
     network_upload = 0
 
@@ -272,7 +272,7 @@ def update3(self, msg_data, create_config):
         self.mqtt_publish(payload_upload, 'sensor', network_upload, create_config=create_config)
 
 
-def parity(self, msg_data, create_config):
+async def parity(self, msg_data, create_config):
     data = msg_data.split(';')
 
     if len(data) < 5:
@@ -303,7 +303,7 @@ def parity(self, msg_data, create_config):
     self.mqtt_publish(payload, 'sensor', state_value, json_attributes, create_config=create_config)
 
 
-def var(self, msg_data, create_config):
+async def var(self, msg_data, create_config):
     msg_data = f'[var]\n{msg_data}'
     prefs = Preferences(msg_data)
     var = prefs.as_dict()
