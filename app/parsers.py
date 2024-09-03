@@ -1,6 +1,6 @@
 import re
 import math
-import requests
+import httpx
 from lxml import etree
 from utils import Preferences
 from humanfriendly import parse_size
@@ -72,6 +72,8 @@ async def shares(self, msg_data, create_config):
 
         if share_use_cache in ['no', 'yes', 'prefer']:
 
+            async with httpx.AsyncClient() as http:
+
             # unRAID 6.11
             if self.unraid_version.startswith('6.11'):
 
@@ -86,7 +88,7 @@ async def shares(self, msg_data, create_config):
                     'arg3': share_cachepool,
                     'csrf_token': self.csrf_token
                 }
-                requests.get(f'{self.unraid_url}/update.htm', params=params, headers=headers)
+                    await http.get(f'{self.unraid_url}/update.htm', params=params, headers=headers)
 
                 # Read result
                 params = {
@@ -97,7 +99,7 @@ async def shares(self, msg_data, create_config):
                     'number': '.'
                 }
 
-                r = requests.get(f'{self.unraid_url}/webGui/include/ShareList.php', params=params, headers=headers)
+                    r = await http.get(f'{self.unraid_url}/webGui/include/ShareList.php', params=params, headers=headers, timeout=600)
 
             # unRAID 6.12+
             else:
@@ -112,8 +114,7 @@ async def shares(self, msg_data, create_config):
                     'all': 1,
                     'csrf_token': self.csrf_token
                 }
-
-                r = requests.get(f'{self.unraid_url}/webGui/include/ShareList.php', data=data, headers=headers)
+                    r = await http.request("GET", url=f'{self.unraid_url}/webGui/include/ShareList.php', data=data, headers=headers, timeout=600)
 
             if r.ok:
                 tree = etree.HTML(r.text)
