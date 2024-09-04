@@ -74,76 +74,76 @@ async def shares(self, msg_data, create_config):
 
             async with httpx.AsyncClient() as http:
 
-            # unRAID 6.11
-            if self.unraid_version.startswith('6.11'):
+                # unRAID 6.11
+                if self.unraid_version.startswith('6.11'):
 
-                # Auth header
-                headers = {'Cookie': self.unraid_cookie + ';ssz=ssz'}
+                    # Auth header
+                    headers = {'Cookie': self.unraid_cookie + ';ssz=ssz'}
 
-                # Calculate used space
-                params = {
-                    'cmd': '/webGui/scripts/share_size',
-                    'arg1': share_nameorig,
-                    'arg2': 'ssz1',
-                    'arg3': share_cachepool,
-                    'csrf_token': self.csrf_token
-                }
+                    # Calculate used space
+                    params = {
+                        'cmd': '/webGui/scripts/share_size',
+                        'arg1': share_nameorig,
+                        'arg2': 'ssz1',
+                        'arg3': share_cachepool,
+                        'csrf_token': self.csrf_token
+                    }
                     await http.get(f'{self.unraid_url}/update.htm', params=params, headers=headers)
 
-                # Read result
-                params = {
-                    'compute': 'no',
-                    'path': 'Shares',
-                    'scale': 1,
-                    'fill': 'ssz',
-                    'number': '.'
-                }
+                    # Read result
+                    params = {
+                        'compute': 'no',
+                        'path': 'Shares',
+                        'scale': 1,
+                        'fill': 'ssz',
+                        'number': '.'
+                    }
 
                     r = await http.get(f'{self.unraid_url}/webGui/include/ShareList.php', params=params, headers=headers, timeout=600)
 
-            # unRAID 6.12+
-            else:
+                # unRAID 6.12+
+                else:
 
-                # Auth header
-                headers = {'Cookie': self.unraid_cookie}
+                    # Auth header
+                    headers = {'Cookie': self.unraid_cookie}
 
-                # Read result
-                data = {
-                    'compute': share_nameorig,
-                    'path': 'Shares',
-                    'all': 1,
-                    'csrf_token': self.csrf_token
-                }
+                    # Read result
+                    data = {
+                        'compute': share_nameorig,
+                        'path': 'Shares',
+                        'all': 1,
+                        'csrf_token': self.csrf_token
+                    }
                     r = await http.request("GET", url=f'{self.unraid_url}/webGui/include/ShareList.php', data=data, headers=headers, timeout=600)
 
-            if r.ok:
-                tree = etree.HTML(r.text)
+                if r.ok:
+                    tree = etree.HTML(r.text)
 
-                size_total_used = tree.xpath(f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[6]/text()')
-                size_total_used = next(iter(size_total_used or []), '0').strip()
-                size_total_used = parse_size(size_total_used)
+                    size_total_used = tree.xpath(f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[6]/text()')
+                    size_total_used = next(iter(size_total_used or []), '0').strip()
+                    size_total_used = parse_size(size_total_used)
 
-                size_total_free = tree.xpath(f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[7]/text()')
-                size_total_free = next(iter(size_total_free or []), '0').strip()
-                size_total_free = parse_size(size_total_free)
+                    size_total_free = tree.xpath(f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[7]/text()')
+                    size_total_free = next(iter(size_total_free or []), '0').strip()
+                    size_total_free = parse_size(size_total_free)
 
-                size_cache_used = tree.xpath(f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1][not(contains(text(), "Disk "))]/../td[6]/text()')
-                size_cache_used = next(iter(size_cache_used or []), '0').strip()
-                size_cache_used = parse_size(size_cache_used)
+                    size_cache_used = tree.xpath(f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1][not(contains(text(), "Disk "))]/../td[6]/text()')
+                    size_cache_used = next(iter(size_cache_used or []), '0').strip()
+                    size_cache_used = parse_size(size_cache_used)
 
-                size_cache_free = tree.xpath(f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1][not(contains(text(), "Disk "))]/../td[7]/text()')
-                size_cache_free = next(iter(size_cache_free or []), '0').strip()
-                size_cache_free = parse_size(size_cache_free)
+                    size_cache_free = tree.xpath(f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1][not(contains(text(), "Disk "))]/../td[7]/text()')
+                    size_cache_free = next(iter(size_cache_free or []), '0').strip()
+                    size_cache_free = parse_size(size_cache_free)
 
-                # # Debug
-                # from humanfriendly import format_size
-                # print(f'Share: {share_nameorig}')
-                # print(f'Used (total): {format_size(size_total_used)} Free (total): {format_size(size_total_free)}')
-                # print(f'Used (cache): {format_size(size_cache_used)} Free (total): {format_size(size_cache_free)}')
+                    # # Debug
+                    # from humanfriendly import format_size
+                    # print(f'Share: {share_nameorig}')
+                    # print(f'Used (total): {format_size(size_total_used)} Free (total): {format_size(size_total_free)}')
+                    # print(f'Used (cache): {format_size(size_cache_used)} Free (total): {format_size(size_cache_free)}')
 
-                # Recalculate used and free space, converted from bytes to kbytes
-                share['used'] = int(size_total_used / 1000)
-                share['free'] = int((size_total_free - size_cache_free - size_cache_used) / 1000)
+                    # Recalculate used and free space, converted from bytes to kbytes
+                    share['used'] = int(size_total_used / 1000)
+                    share['free'] = int((size_total_free - size_cache_free - size_cache_used) / 1000)
 
         # Skip empty shares
         if share['used'] == 0:
