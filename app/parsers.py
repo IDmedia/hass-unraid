@@ -1,20 +1,20 @@
 import re
 import math
-import requests
+import httpx
 from lxml import etree
 from utils import Preferences
 from humanfriendly import parse_size
 
 
-def default(self, msg_data, create_config):
+async def default(self, msg_data, create_config):
     pass
 
 
-def session(self, msg_data, create_config):
+async def session(self, msg_data, create_config):
     self.csrf_token = msg_data
 
 
-def cpuload(self, msg_data, create_config):
+async def cpuload(self, msg_data, create_config):
     prefs = Preferences(msg_data)
     state_value = int(prefs.as_dict()['cpu']['host'])
 
@@ -28,7 +28,7 @@ def cpuload(self, msg_data, create_config):
     self.mqtt_publish(payload, 'sensor', state_value, create_config=create_config)
 
 
-def disks(self, msg_data, create_config):
+async def disks(self, msg_data, create_config):
     prefs = Preferences(msg_data)
     disks = prefs.as_dict()
 
@@ -57,7 +57,7 @@ def disks(self, msg_data, create_config):
         self.mqtt_publish(payload, 'sensor', disk_temp, json_attributes, create_config=create_config, retain=True)
 
 
-def shares(self, msg_data, create_config):
+async def shares(self, msg_data, create_config):
     prefs = Preferences(msg_data)
     shares = prefs.as_dict()
 
@@ -72,77 +72,78 @@ def shares(self, msg_data, create_config):
 
         if share_use_cache in ['no', 'yes', 'prefer']:
 
-            # unRAID 6.11
-            if self.unraid_version.startswith('6.11'):
+            async with httpx.AsyncClient() as http:
 
-                # Auth header
-                headers = {'Cookie': self.unraid_cookie + ';ssz=ssz'}
+                # unRAID 6.11
+                if self.unraid_version.startswith('6.11'):
 
-                # Calculate used space
-                params = {
-                    'cmd': '/webGui/scripts/share_size',
-                    'arg1': share_nameorig,
-                    'arg2': 'ssz1',
-                    'arg3': share_cachepool,
-                    'csrf_token': self.csrf_token
-                }
-                requests.get(f'{self.unraid_url}/update.htm', params=params, headers=headers)
+                    # Auth header
+                    headers = {'Cookie': self.unraid_cookie + ';ssz=ssz'}
 
-                # Read result
-                params = {
-                    'compute': 'no',
-                    'path': 'Shares',
-                    'scale': 1,
-                    'fill': 'ssz',
-                    'number': '.'
-                }
+                    # Calculate used space
+                    params = {
+                        'cmd': '/webGui/scripts/share_size',
+                        'arg1': share_nameorig,
+                        'arg2': 'ssz1',
+                        'arg3': share_cachepool,
+                        'csrf_token': self.csrf_token
+                    }
+                    await http.get(f'{self.unraid_url}/update.htm', params=params, headers=headers)
 
-                r = requests.get(f'{self.unraid_url}/webGui/include/ShareList.php', params=params, headers=headers)
+                    # Read result
+                    params = {
+                        'compute': 'no',
+                        'path': 'Shares',
+                        'scale': 1,
+                        'fill': 'ssz',
+                        'number': '.'
+                    }
 
-            # unRAID 6.12+
-            else:
+                    r = await http.get(f'{self.unraid_url}/webGui/include/ShareList.php', params=params, headers=headers, timeout=600)
 
-                # Auth header
-                headers = {'Cookie': self.unraid_cookie}
+                # unRAID 6.12+
+                else:
 
-                # Read result
-                data = {
-                    'compute': share_nameorig,
-                    'path': 'Shares',
-                    'all': 1,
-                    'csrf_token': self.csrf_token
-                }
+                    # Auth header
+                    headers = {'Cookie': self.unraid_cookie}
 
-                r = requests.get(f'{self.unraid_url}/webGui/include/ShareList.php', data=data, headers=headers)
+                    # Read result
+                    data = {
+                        'compute': share_nameorig,
+                        'path': 'Shares',
+                        'all': 1,
+                        'csrf_token': self.csrf_token
+                    }
+                    r = await http.request("GET", url=f'{self.unraid_url}/webGui/include/ShareList.php', data=data, headers=headers, timeout=600)
 
-            if r.ok:
-                tree = etree.HTML(r.text)
+                if r.ok:
+                    tree = etree.HTML(r.text)
 
-                size_total_used = tree.xpath(f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[6]/text()')
-                size_total_used = next(iter(size_total_used or []), '0').strip()
-                size_total_used = parse_size(size_total_used)
+                    size_total_used = tree.xpath(f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[6]/text()')
+                    size_total_used = next(iter(size_total_used or []), '0').strip()
+                    size_total_used = parse_size(size_total_used)
 
-                size_total_free = tree.xpath(f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[7]/text()')
-                size_total_free = next(iter(size_total_free or []), '0').strip()
-                size_total_free = parse_size(size_total_free)
+                    size_total_free = tree.xpath(f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[7]/text()')
+                    size_total_free = next(iter(size_total_free or []), '0').strip()
+                    size_total_free = parse_size(size_total_free)
 
-                size_cache_used = tree.xpath(f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1][not(contains(text(), "Disk "))]/../td[6]/text()')
-                size_cache_used = next(iter(size_cache_used or []), '0').strip()
-                size_cache_used = parse_size(size_cache_used)
+                    size_cache_used = tree.xpath(f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1][not(contains(text(), "Disk "))]/../td[6]/text()')
+                    size_cache_used = next(iter(size_cache_used or []), '0').strip()
+                    size_cache_used = parse_size(size_cache_used)
 
-                size_cache_free = tree.xpath(f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1][not(contains(text(), "Disk "))]/../td[7]/text()')
-                size_cache_free = next(iter(size_cache_free or []), '0').strip()
-                size_cache_free = parse_size(size_cache_free)
+                    size_cache_free = tree.xpath(f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1][not(contains(text(), "Disk "))]/../td[7]/text()')
+                    size_cache_free = next(iter(size_cache_free or []), '0').strip()
+                    size_cache_free = parse_size(size_cache_free)
 
-                # # Debug
-                # from humanfriendly import format_size
-                # print(f'Share: {share_nameorig}')
-                # print(f'Used (total): {format_size(size_total_used)} Free (total): {format_size(size_total_free)}')
-                # print(f'Used (cache): {format_size(size_cache_used)} Free (total): {format_size(size_cache_free)}')
+                    # # Debug
+                    # from humanfriendly import format_size
+                    # print(f'Share: {share_nameorig}')
+                    # print(f'Used (total): {format_size(size_total_used)} Free (total): {format_size(size_total_free)}')
+                    # print(f'Used (cache): {format_size(size_cache_used)} Free (total): {format_size(size_cache_free)}')
 
-                # Recalculate used and free space, converted from bytes to kbytes
-                share['used'] = int(size_total_used / 1000)
-                share['free'] = int((size_total_free - size_cache_free - size_cache_used) / 1000)
+                    # Recalculate used and free space, converted from bytes to kbytes
+                    share['used'] = int(size_total_used / 1000)
+                    share['free'] = int((size_total_free - size_cache_free - size_cache_used) / 1000)
 
         # Skip empty shares
         if share['used'] == 0:
@@ -169,7 +170,7 @@ def shares(self, msg_data, create_config):
         self.mqtt_publish(payload, 'sensor', share_used_pct, json_attributes, create_config=create_config, retain=True)
 
 
-def temperature(self, msg_data, create_config):
+async def temperature(self, msg_data, create_config):
     tree = etree.HTML(msg_data)
     sensors = tree.xpath('.//span[@title]')
 
@@ -205,7 +206,7 @@ def temperature(self, msg_data, create_config):
             self.mqtt_publish(payload, 'sensor', device_value, create_config=create_config)
 
 
-def update1(self, msg_data, create_config):
+async def update1(self, msg_data, create_config):
     memory_categories = ['RAM', 'Flash', 'Log', 'Docker']
     for (memory_name, memory_usage) in zip(memory_categories, re.findall(re.compile(r'(\d+%)'), msg_data)):
         memory_value = ''.join(c for c in memory_usage if c.isdigit())
@@ -240,7 +241,7 @@ def update1(self, msg_data, create_config):
             self.mqtt_publish(payload, 'sensor', fan_value, create_config=create_config)
 
 
-def update3(self, msg_data, create_config):
+async def update3(self, msg_data, create_config):
     network_download = 0
     network_upload = 0
 
@@ -272,7 +273,7 @@ def update3(self, msg_data, create_config):
         self.mqtt_publish(payload_upload, 'sensor', network_upload, create_config=create_config)
 
 
-def parity(self, msg_data, create_config):
+async def parity(self, msg_data, create_config):
     data = msg_data.split(';')
 
     if len(data) < 5:
@@ -303,7 +304,7 @@ def parity(self, msg_data, create_config):
     self.mqtt_publish(payload, 'sensor', state_value, json_attributes, create_config=create_config)
 
 
-def var(self, msg_data, create_config):
+async def var(self, msg_data, create_config):
     msg_data = f'[var]\n{msg_data}'
     prefs = Preferences(msg_data)
     var = prefs.as_dict()
