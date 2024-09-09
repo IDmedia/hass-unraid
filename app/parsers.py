@@ -116,7 +116,7 @@ async def shares(self, msg_data, create_config):
                     }
                     r = await http.request("GET", url=f'{self.unraid_url}/webGui/include/ShareList.php', data=data, headers=headers, timeout=600)
 
-                if r.ok:
+                if r.status_code == httpx.codes.OK:
                     tree = etree.HTML(r.text)
 
                     size_total_used = tree.xpath(f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[6]/text()')
