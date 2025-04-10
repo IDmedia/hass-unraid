@@ -243,30 +243,35 @@ async def update1(self, msg_data, create_config):
 
 
 async def update3(self, msg_data, create_config):
+    data = msg_data.replace('\n', '\\n')
+    parsed_data = json.loads(data)
+
     network_download = 0
     network_upload = 0
 
-    for line in msg_data.splitlines():
-        network = [n.strip() for n in line.split(' ')]
+    for port_info in parsed_data.get('port', []):
+        port_name = port_info[0]
 
-        if not network[0].startswith('eth'):
+        if not port_name.startswith('eth'):
             continue
 
-        network_download_text = ' '.join(network[1:3])
-        network_download += round(parse_size(network_download_text) / 1000 / 1000, 1)
+        network_download_text = port_info[1]
+        network_download += round(parse_size(network_download_text) / 1000 / 1000, 1)  # Parse and convert to Mbps
+
+        network_upload_text = port_info[2]
+        network_upload += round(parse_size(network_upload_text) / 1000 / 1000, 1)  # Parse and convert to Mbps
+
         payload_download = {
-            'name': 'Download Throughput',
+            'name': f'Download Throughput ({port_name})',
             'unit_of_measurement': 'Mbit/s',
             'icon': 'mdi:download',
             'state_class': 'measurement'
         }
 
-        network_upload_text = ' '.join(network[3:5])
-        network_upload += round(parse_size(network_upload_text) / 1000 / 1000, 1)
         payload_upload = {
-            'name': 'Upload Throughput',
+            'name': f'Upload Throughput ({port_name})',
             'unit_of_measurement': 'Mbit/s',
-            'icon': 'mdi:download',
+            'icon': 'mdi:upload',
             'state_class': 'measurement'
         }
 
