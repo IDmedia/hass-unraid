@@ -1,4 +1,5 @@
 import re
+import json
 import math
 import httpx
 from lxml import etree
@@ -274,14 +275,14 @@ async def update3(self, msg_data, create_config):
 
 
 async def parity(self, msg_data, create_config):
-    data = msg_data.split(';')
+    data = json.loads(msg_data)
 
     if len(data) < 5:
         return
 
-    position_size = re.sub(r'\([^)]*\)', '', data[2])
-    position_pct = data[2][data[2].find('(') + 1:data[2].find(')')]
-    position_pct = ''.join(c for c in position_pct if c.isdigit() or c == '.')
+    current_position = re.search(r"(.+?) \(([\d.]+)\s?%\)", data[2])
+    position_size = current_position.group(1).strip()
+    position_pct = current_position.group(2).strip()
 
     state_value = float(position_pct)
 
