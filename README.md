@@ -23,6 +23,7 @@ This Docker container parses and forwards all WebSocket messages from your Unrai
 
 
 ## Prerequisites
+This integration only works with Unraid 7 or later.
 Ensure that Home Assistant and MQTT are correctly configured before proceeding.
 
 

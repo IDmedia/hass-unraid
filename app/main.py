@@ -11,8 +11,8 @@ import logging
 import parsers
 import websockets
 from lxml import etree
-from utils import load_file, normalize_str, handle_sigterm
 from gmqtt import Client as MQTTClient, Message
+from utils import load_file, normalize_str, handle_sigterm, compare_versions
 
 
 class UnRAIDServer(object):
@@ -26,6 +26,7 @@ class UnRAIDServer(object):
         unraid_protocol = 'https://' if unraid_ssl else 'http://'
 
         self.unraid_version = ''
+        self.unraid_version_min = '7.0.0'
         self.unraid_name = unraid_config.get('name')
         self.unraid_username = unraid_config.get('username')
         self.unraid_password = unraid_config.get('password')
@@ -182,8 +183,30 @@ class UnRAIDServer(object):
 
                     r = await http.get(f'{self.unraid_url}/Dashboard', follow_redirects=True, timeout=120)
                     tree = etree.HTML(r.text)
-                    version_elem = tree.xpath('.//div[@class="logo"]/text()[preceding-sibling::a]')
-                    self.unraid_version = ''.join(c for c in ''.join(version_elem) if c.isdigit() or c == '.')
+                    
+                    user_profile_elem = tree.xpath('.//unraid-user-profile')
+                    if user_profile_elem:
+                        server_data = user_profile_elem[0].get('server')
+                        if server_data:
+                            server_data = json.loads(server_data.replace('&quot;', '\"'))
+                            self.unraid_version = server_data.get('osVersion', 'Unknown')
+                        else:
+                            self.unraid_version = 'Unknown'
+                    else:
+                        self.unraid_version = 'Unknown'
+                    
+                # Check if the Unraid version is unsupported
+                comparison_result = compare_versions(self.unraid_version, self.unraid_version_min)
+
+                # Handle invalid versions explicitly
+                if comparison_result is None:
+                    self.logger.error(f"Invalid Unraid version detected: '{self.unraid_version}'")
+                    sys.exit(1)
+
+                # Compare versions
+                if comparison_result < 0:
+                    self.logger.error(f'Unsupported Unraid version: {self.unraid_version}. Requires version {self.unraid_version_min} or higher.')
+                    sys.exit(1)
 
                 headers = {'Cookie': self.unraid_cookie}
                 subprotocols = ['ws+meta.nchan']
@@ -213,7 +236,7 @@ class UnRAIDServer(object):
                                               subprotocols=subprotocols,
                                               extra_headers=headers,
                                               ssl=ssl_context) as websocket:
-                    self.logger.info('Successfully connected to unraid')
+                    self.logger.info(f'Successfully connected to Unraid {self.unraid_version}')
 
                     # Docker channel needs to be triggered
                     # await session.get(f'{self.url}/Docker')
