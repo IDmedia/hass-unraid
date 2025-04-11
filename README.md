@@ -45,7 +45,7 @@ unraid:
     host: 192.168.1.20
     port: 80
     ssl: true
-	ssl_verify: false
+    ssl_verify: false
     username: root
     password: PASSWORD
     scan_interval: 30
