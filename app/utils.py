@@ -94,6 +94,7 @@ def compare_versions(version1, version2):
     # Versions are equal
     return 0
 
+
 def load_file(path_to_file):
     if not os.path.isfile(path_to_file):
         return {}

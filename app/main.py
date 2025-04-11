@@ -183,7 +183,7 @@ class UnRAIDServer(object):
 
                     r = await http.get(f'{self.unraid_url}/Dashboard', follow_redirects=True, timeout=120)
                     tree = etree.HTML(r.text)
-                    
+
                     user_profile_elem = tree.xpath('.//unraid-user-profile')
                     if user_profile_elem:
                         server_data = user_profile_elem[0].get('server')
@@ -194,7 +194,7 @@ class UnRAIDServer(object):
                             self.unraid_version = 'Unknown'
                     else:
                         self.unraid_version = 'Unknown'
-                    
+
                 # Check if the Unraid version is unsupported
                 comparison_result = compare_versions(self.unraid_version, self.unraid_version_min)
 
