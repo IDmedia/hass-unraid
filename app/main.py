@@ -209,9 +209,9 @@ class UnRAIDServer(object):
                     ssl_context.verify_mode = ssl.CERT_NONE
 
                 # Establish WebSocket connection using the custom SSL context
-                async with websockets.connect(websocket_url, 
-                                              subprotocols=subprotocols, 
-                                              extra_headers=headers, 
+                async with websockets.connect(websocket_url,
+                                              subprotocols=subprotocols,
+                                              extra_headers=headers,
                                               ssl=ssl_context) as websocket:
                     self.logger.info('Successfully connected to unraid')
 

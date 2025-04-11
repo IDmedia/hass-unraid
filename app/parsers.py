@@ -74,7 +74,6 @@ async def shares(self, msg_data, create_config):
         share_floor_size = share['floor']
         share_nameorig = share['nameorig']
         share_use_cache = share['usecache']
-        share_cachepool = share['cachepool']
 
         # Handle cases where share caching is enabled
         if share_use_cache in ['no', 'yes', 'prefer']:
