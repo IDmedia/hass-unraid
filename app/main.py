@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import ssl
 import time
 import json
 import httpx
@@ -169,10 +170,12 @@ class UnRAIDServer(object):
             self.logger.info('Connecting to unraid...')
             last_msg = ''
             try:
+                # Get Unraid auth key
                 payload = {
                     'username': self.unraid_username,
                     'password': self.unraid_password
                 }
+
                 async with httpx.AsyncClient(verify=self.verify_ssl) as http:
                     r = await http.post(f'{self.unraid_url}/login', data=payload, timeout=120)
                     self.unraid_cookie = r.headers.get('set-cookie')
@@ -198,17 +201,36 @@ class UnRAIDServer(object):
                 }
                 websocket_url = f'{self.unraid_ws}/sub/{",".join(sub_channels)}'
 
-                async with websockets.connect(websocket_url, subprotocols=subprotocols, extra_headers=headers) as websocket:
+                # Create a custom SSL context to ignore SSL certificate validation if needed
+                ssl_context = None
+                if not self.verify_ssl:
+                    ssl_context = ssl.create_default_context()
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl.CERT_NONE
+
+                # Establish WebSocket connection using the custom SSL context
+                async with websockets.connect(websocket_url, 
+                                              subprotocols=subprotocols, 
+                                              extra_headers=headers, 
+                                              ssl=ssl_context) as websocket:
                     self.logger.info('Successfully connected to unraid')
 
+                    # Docker channel needs to be triggered
+                    # await session.get(f'{self.url}/Docker')
+
+                    # Listen for messages
                     while self.mqtt_connected:
                         data = await asyncio.wait_for(websocket.recv(), timeout=120)
+                        # Store last message
                         last_msg = data
+
+                        # Parse message id and content
                         msg_data = data.replace('\00', ' ').split('\n\n', 1)[1]
                         msg_ids = re.findall(r'([-\[\d\],]+,[-\[\d\],]*)|$', data)[0].split(',')
                         sub_channel = next(sub for (sub, msg) in zip(sub_channels, msg_ids) if msg.startswith('['))
                         msg_parser = sub_channels.get(sub_channel, parsers.default)
 
+                        # Skip resource-intensive share parsing if within time limit
                         if sub_channel == 'shares':
                             current_time = time.time()
                             time_passed = current_time - self.share_parser_lastrun
@@ -216,11 +238,13 @@ class UnRAIDServer(object):
                                 continue
                             self.share_parser_lastrun = current_time
 
+                        # Create config if it doesn't exist for the subchannel
                         if sub_channel not in self.mqtt_history:
                             self.logger.info(f'Create config for {sub_channel}')
                             self.mqtt_history[sub_channel] = (time.time() - self.scan_interval)
                             self.loop.create_task(msg_parser(self, msg_data, create_config=True))
 
+                        # Parse content periodically for the subchannel
                         if self.scan_interval <= (time.time() - self.mqtt_history.get(sub_channel, time.time())):
                             self.logger.info(f'Parse data for {sub_channel}')
                             self.mqtt_history[sub_channel] = time.time()

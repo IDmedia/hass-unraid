@@ -76,62 +76,60 @@ async def shares(self, msg_data, create_config):
         share_use_cache = share['usecache']
         share_cachepool = share['cachepool']
 
-        # Handle cases where share caching is enabled.
+        # Handle cases where share caching is enabled
         if share_use_cache in ['no', 'yes', 'prefer']:
-            async with httpx.AsyncClient() as http:
-                if self.unraid_version.startswith('6.11'):
-                    # unRAID 6.11 specific requests
-                    headers = {'Cookie': self.unraid_cookie + ';ssz=ssz'}
-                    params = {
-                        'cmd': '/webGui/scripts/share_size',
-                        'arg1': share_nameorig,
-                        'arg2': 'ssz1',
-                        'arg3': share_cachepool,
-                        'csrf_token': self.csrf_token
-                    }
-                    await http.get(f'{self.unraid_url}/update.htm', params=params, headers=headers)
-
-                    params = {
-                        'compute': 'no',
-                        'path': 'Shares',
-                        'scale': 1,
-                        'fill': 'ssz',
-                        'number': '.'
-                    }
-                    r = await http.get(f'{self.unraid_url}/webGui/include/ShareList.php', params=params, headers=headers, timeout=600)
-
-                else:
-                    # unRAID 6.12+ requests
-                    headers = {'Cookie': self.unraid_cookie}
-                    data = {
-                        'compute': share_nameorig,
-                        'path': 'Shares',
-                        'all': 1,
-                        'csrf_token': self.csrf_token
-                    }
-                    r = await http.request('GET', url=f'{self.unraid_url}/webGui/include/ShareList.php', data=data, headers=headers, timeout=600)
+            async with httpx.AsyncClient(verify=self.verify_ssl) as http:  # Use self.verify_ssl here
+                headers = {'Cookie': self.unraid_cookie}
+                data = {
+                    'compute': share_nameorig,
+                    'path': 'Shares',
+                    'all': 1,
+                    'csrf_token': self.csrf_token
+                }
+                try:
+                    # Ensure the verify_ssl setting applies to this call
+                    r = await http.request(
+                        'GET',
+                        url=f'{self.unraid_url}/webGui/include/ShareList.php',
+                        data=data,
+                        headers=headers,
+                        timeout=600
+                    )
+                except httpx.RequestError as e:
+                    self.logger.error(f"Failed to request share data for '{share_name}': {e}")
+                    continue
 
                 if r.status_code == httpx.codes.OK:
                     tree = etree.HTML(r.text)
 
-                    # Parses total and cache space used/free for shares.
-                    size_total_used = tree.xpath(f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[6]/text()')
+                    # Parses total and cache space used/free for shares
+                    size_total_used = tree.xpath(
+                        f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[6]/text()'
+                    )
                     size_total_used = next(iter(size_total_used or []), '0').strip()
                     size_total_used = humanfriendly.parse_size(size_total_used)
 
-                    size_total_free = tree.xpath(f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[7]/text()')
+                    size_total_free = tree.xpath(
+                        f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[7]/text()'
+                    )
                     size_total_free = next(iter(size_total_free or []), '0').strip()
                     size_total_free = humanfriendly.parse_size(size_total_free)
 
-                    size_cache_used = tree.xpath(f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1][not(contains(text(), "Disk "))]/../td[6]/text()')
+                    size_cache_used = tree.xpath(
+                        f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1]'
+                        f'[not(contains(text(), "Disk "))]/../td[6]/text()'
+                    )
                     size_cache_used = next(iter(size_cache_used or []), '0').strip()
                     size_cache_used = humanfriendly.parse_size(size_cache_used)
 
-                    size_cache_free = tree.xpath(f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1][not(contains(text(), "Disk "))]/../td[7]/text()')
+                    size_cache_free = tree.xpath(
+                        f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1]'
+                        f'[not(contains(text(), "Disk "))]/../td[7]/text()'
+                    )
                     size_cache_free = next(iter(size_cache_free or []), '0').strip()
                     size_cache_free = humanfriendly.parse_size(size_cache_free)
 
-                    # Updates share usage based on calculated values.
+                    # Updates share usage based on calculated values
                     share['used'] = int(size_total_used / 1000)
                     share['free'] = int((size_total_free - size_cache_free - size_cache_used) / 1000)
 
@@ -269,6 +267,7 @@ async def update3(self, msg_data, create_config):
 # Processes and sends UPS data.
 async def apcups(self, msg_data, create_config):
     msg_data = msg_data.replace(r"\/", "/")
+
     parsed_data = json.loads(msg_data)
 
     def clean_html(value):
@@ -281,8 +280,12 @@ async def apcups(self, msg_data, create_config):
         except humanfriendly.InvalidTimespan:
             return 0
 
-    ups_model = parsed_data[0]
+    ups_model = clean_html(parsed_data[0])
+    ups_model = "" if ups_model == "-" else ups_model
+
     ups_status = clean_html(parsed_data[1])
+    ups_status = "" if ups_status == "-" else ups_status
+
     battery_charge = clean_html(parsed_data[2])
     runtime_left = clean_html(parsed_data[3])
     nominal_power = clean_html(parsed_data[4])
@@ -305,7 +308,13 @@ async def apcups(self, msg_data, create_config):
         'Output Voltage': output_voltage,
     }
 
+    if not parsed_data['Model']:
+        return
+
     for key, value in parsed_data.items():
+        if key in ['Model', 'Status'] and not value:
+            continue
+
         payload = {
             'name': f'UPS {key}',
             'icon': 'mdi:power' if 'Status' in key or 'Power' in key else
