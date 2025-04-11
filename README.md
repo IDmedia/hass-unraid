@@ -36,7 +36,7 @@ unraid:
   - name: Kaya
     host: 192.168.1.10
     port: 80
-    ssl: False
+    ssl: false
     username: root
     password: PASSWORD
     scan_interval: 30
@@ -44,7 +44,8 @@ unraid:
   - name: Hisa
     host: 192.168.1.20
     port: 80
-    ssl: False
+    ssl: true
+	ssl_verify: false
     username: root
     password: PASSWORD
     scan_interval: 30

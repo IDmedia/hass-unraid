@@ -20,6 +20,7 @@ class UnRAIDServer(object):
         unraid_host = unraid_config.get('host')
         unraid_port = unraid_config.get('port')
         unraid_ssl = unraid_config.get('ssl', False)
+        verify_ssl = unraid_config.get('ssl_verify', True)
         unraid_address = f'{unraid_host}:{unraid_port}'
         unraid_protocol = 'https://' if unraid_ssl else 'http://'
 
@@ -34,12 +35,14 @@ class UnRAIDServer(object):
         self.share_parser_interval = 3600
         self.csrf_token = ''
         self.unraid_cookie = ''
+        self.verify_ssl = verify_ssl
 
         # MQTT client
         self.mqtt_connected = False
         unraid_id = normalize_str(self.unraid_name)
         will_message = Message(f'unraid/{unraid_id}/connectivity/state', 'OFF', retain=True)
         self.mqtt_client = MQTTClient(self.unraid_name, will_message=will_message)
+
         asyncio.ensure_future(self.mqtt_connect(mqtt_config))
 
         # Logger
@@ -61,6 +64,7 @@ class UnRAIDServer(object):
 
         self.mqtt_connected = True
         self.mqtt_status(connected=True, create_config=True)
+
         self.unraid_task = asyncio.ensure_future(self.ws_connect())
 
     def on_message(self, client, topic, payload, qos, properties):
@@ -88,33 +92,31 @@ class UnRAIDServer(object):
 
         # Create config
         if create_config:
-
-            # Create device
             device = {
                 'name': self.unraid_name,
                 'identifiers': f'unraid_{unraid_id}'.lower(),
                 'model': 'Unraid',
                 'manufacturer': 'Lime Technology'
             }
+
             if self.unraid_version:
                 device['sw_version'] = self.unraid_version
 
-            # Update payload with default fields
             create_config = payload
 
             if state_value is not None:
                 create_config['state_topic'] = f'unraid/{unraid_id}/{sensor_id}/state'
+
             if json_attributes:
                 create_config['json_attributes_topic'] = f'unraid/{unraid_id}/{sensor_id}/attributes'
+
             if sensor_type == 'button':
                 create_config['command_topic'] = f'unraid/{unraid_id}/{sensor_id}/commands'
 
-            # Expire all sensors except binary_sensor (connectivity)
             if not sensor_id.startswith(('connectivity', 'share_', 'disk_')):
                 expire_in_seconds = self.scan_interval * 4
                 create_config['expire_after'] = expire_in_seconds if expire_in_seconds > 120 else 120
 
-            # Append extra fields
             config_fields = {
                 'name': f'{payload["name"]}',
                 'attribution': 'Data provided by UNRAID',
@@ -123,23 +125,20 @@ class UnRAIDServer(object):
             }
             create_config.update(config_fields)
 
-            # Create config
             self.mqtt_client.publish(f'homeassistant/{sensor_type}/{unraid_sensor_id}/config', json.dumps(create_config), retain=True)
 
-        # Push state update
         if state_value is not None:
+            # Add slight delay after creating config to prevent race conditions
+            time.sleep(0.1)
             self.mqtt_client.publish(f'unraid/{unraid_id}/{sensor_id}/state', state_value, retain=retain)
 
-        # Push attributes update
         if json_attributes:
             self.mqtt_client.publish(f'unraid/{unraid_id}/{sensor_id}/attributes', json.dumps(json_attributes), retain=retain)
 
-        # Subscribe to buttons
         if sensor_type == 'button':
             self.mqtt_client.subscribe(f'unraid/{unraid_id}/{sensor_id}/commands', qos=0, retain=retain)
 
     async def mqtt_connect(self, mqtt_config):
-        # MQTT config
         mqtt_host = mqtt_config.get('host')
         mqtt_port = mqtt_config.get('port', 1883)
         mqtt_username = mqtt_config.get('username')
@@ -147,6 +146,7 @@ class UnRAIDServer(object):
 
         self.mqtt_history = {}
         self.share_parser_lastrun = 0
+
         self.mqtt_client.on_connect = self.on_connect
         self.mqtt_client.on_message = self.on_message
         self.mqtt_client.on_disconnect = self.on_disconnect
@@ -157,7 +157,6 @@ class UnRAIDServer(object):
                 self.logger.info('Connecting to mqtt server...')
                 await self.mqtt_client.connect(mqtt_host, mqtt_port)
                 break
-
             except ConnectionRefusedError:
                 self.logger.error('Failed to connect to mqtt server because the connection was refused...')
                 await asyncio.sleep(30)
@@ -169,15 +168,12 @@ class UnRAIDServer(object):
         while self.mqtt_connected:
             self.logger.info('Connecting to unraid...')
             last_msg = ''
-
             try:
-                # Get Unraid auth key
                 payload = {
                     'username': self.unraid_username,
                     'password': self.unraid_password
                 }
-
-                async with httpx.AsyncClient() as http:
+                async with httpx.AsyncClient(verify=self.verify_ssl) as http:
                     r = await http.post(f'{self.unraid_url}/login', data=payload, timeout=120)
                     self.unraid_cookie = r.headers.get('set-cookie')
 
@@ -186,62 +182,45 @@ class UnRAIDServer(object):
                     version_elem = tree.xpath('.//div[@class="logo"]/text()[preceding-sibling::a]')
                     self.unraid_version = ''.join(c for c in ''.join(version_elem) if c.isdigit() or c == '.')
 
-                # Connect to WS
                 headers = {'Cookie': self.unraid_cookie}
                 subprotocols = ['ws+meta.nchan']
-
                 sub_channels = {
                     'var': parsers.var,
                     'session': parsers.session,
                     'cpuload': parsers.cpuload,
-                    # 'diskload': parsers.default,
+                    'apcups': parsers.apcups,
                     'disks': parsers.disks,
                     'parity': parsers.parity,
                     'shares': parsers.shares,
                     'update1': parsers.update1,
                     'update3': parsers.update3,
-                    # 'dockerload': parsers.default,
                     'temperature': parsers.temperature
                 }
-
                 websocket_url = f'{self.unraid_ws}/sub/{",".join(sub_channels)}'
+
                 async with websockets.connect(websocket_url, subprotocols=subprotocols, extra_headers=headers) as websocket:
                     self.logger.info('Successfully connected to unraid')
 
-                    # Docker channel needs to be triggered
-                    # await session.get(f'{self.url}/Docker')
-
-                    # Listen for messages
                     while self.mqtt_connected:
                         data = await asyncio.wait_for(websocket.recv(), timeout=120)
-
-                        # Store last message
                         last_msg = data
-
-                        # Parse message id and content
                         msg_data = data.replace('\00', ' ').split('\n\n', 1)[1]
                         msg_ids = re.findall(r'([-\[\d\],]+,[-\[\d\],]*)|$', data)[0].split(',')
                         sub_channel = next(sub for (sub, msg) in zip(sub_channels, msg_ids) if msg.startswith('['))
                         msg_parser = sub_channels.get(sub_channel, parsers.default)
 
-                        # Skip share calculation if within time limit as it's resource intensive
                         if sub_channel == 'shares':
                             current_time = time.time()
                             time_passed = current_time - self.share_parser_lastrun
                             if time_passed <= self.share_parser_interval:
-                                # seconds_left = int(self.share_parser_interval - time_passed)
-                                # self.logger.info(f'Ignoring data for shares (rate-limited for {seconds_left} more seconds)')
                                 continue
-
                             self.share_parser_lastrun = current_time
 
-                        # Create config
                         if sub_channel not in self.mqtt_history:
                             self.logger.info(f'Create config for {sub_channel}')
                             self.mqtt_history[sub_channel] = (time.time() - self.scan_interval)
                             self.loop.create_task(msg_parser(self, msg_data, create_config=True))
 
-                        # Parse content
                         if self.scan_interval <= (time.time() - self.mqtt_history.get(sub_channel, time.time())):
                             self.logger.info(f'Parse data for {sub_channel}')
                             self.mqtt_history[sub_channel] = time.time()
@@ -251,7 +230,6 @@ class UnRAIDServer(object):
                 self.logger.error('Failed to connect to unraid due to a timeout or connection issue...')
                 self.mqtt_status(connected=False)
                 await asyncio.sleep(30)
-
             except Exception:
                 self.logger.exception('Failed to connect to unraid due to an exception...')
                 self.logger.error('Last message received:')
