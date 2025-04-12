@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import yaml
 import configparser
@@ -65,8 +66,12 @@ def remove_quotes(config):
 
 def compare_versions(version1, version2):
     def is_valid_version(version):
-        # Check if the version contains only digits and dots (e.g., "7.1.0")
-        return all(part.isdigit() for part in version.split('.'))
+        # Check if the version contains at least one digit
+        return bool(re.search(r'\d', version))
+
+    def normalize_version(version):
+        # Use a regex to extract all numeric parts separated by dots
+        return [int(part) for part in re.findall(r'\d+', version)]
 
     # Handle invalid or non-numeric versions
     if not version1 or not is_valid_version(version1):
@@ -74,11 +79,11 @@ def compare_versions(version1, version2):
     if not version2 or not is_valid_version(version2):
         return None
 
-    # Split the versions into parts for comparison
-    parts1 = list(map(int, version1.split('.')))
-    parts2 = list(map(int, version2.split('.')))
+    # Normalize the versions by extracting numeric parts and converting to a list of integers
+    parts1 = normalize_version(version1)
+    parts2 = normalize_version(version2)
 
-    # Compare each part of the version (major, minor, patch)
+    # Compare each part of the version (major, minor, patch, etc.)
     for v1, v2 in zip(parts1, parts2):
         if v1 < v2:
             return -1

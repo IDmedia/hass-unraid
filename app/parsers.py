@@ -18,7 +18,98 @@ async def session(self, msg_data, create_config):
     self.csrf_token = msg_data
 
 
-# Processes CPU utilization data and sends it as a sensor update.
+# Processes GPU-related data and creates corresponding sensors dynamically.
+async def gpu_stat(self, msg_data, create_config):
+    parsed_data = json.loads(msg_data)
+
+    def is_valid(value):
+        """
+        Checks if a value is valid (not None, not empty, and not placeholders like 'N/A' or 'Unknown').
+        """
+        invalid_values = {'N/A', 'N\\/A', 'Unknown', 'unknown', '', None}
+        if str(value).strip() in invalid_values:
+            return False
+
+        # For numerical values with units (e.g., "5%", "10W", "28°C"), test for conversion
+        try:
+            cleaned_value = str(value).replace('%', '').replace('°C', '').replace('W', '').strip()
+            float(cleaned_value)
+            return True
+        except ValueError:
+            return False
+
+    for gpu_id, gpu_data in parsed_data.items():
+        name = gpu_data.get('name', f'GPU {gpu_id}')
+
+        # Load sensor
+        if is_valid(gpu_data.get('util')):
+            load_pct = int(float(gpu_data['util'].replace('%', '').strip()))
+            payload = {
+                'name': f'{name} Load',
+                'unit_of_measurement': '%',
+                'icon': 'mdi:chart-line',
+                'state_class': 'measurement',
+            }
+            self.mqtt_publish(payload, 'sensor', load_pct, create_config=create_config)
+
+        # Memory sensor
+        if all(is_valid(gpu_data.get(key)) for key in ['memutil', 'memused', 'memtotal']):
+            mem_used = int(gpu_data['memused'])
+            mem_total = int(gpu_data['memtotal'])
+            mem_pct = int(float(gpu_data['memutil'].replace('%', '').strip()))
+            payload = {
+                'name': f'{name} Memory Usage',
+                'unit_of_measurement': '%',
+                'icon': 'mdi:memory',
+                'state_class': 'measurement',
+            }
+            json_attributes = {'used': mem_used, 'total': mem_total}
+            self.mqtt_publish(payload, 'sensor', mem_pct, json_attributes, create_config=create_config)
+
+        # Fan sensor
+        if is_valid(gpu_data.get('fan')):
+            fan_pct = int(float(gpu_data['fan'].replace('%', '').strip()))
+            payload = {
+                'name': f'{name} Fan Speed',
+                'unit_of_measurement': '%',
+                'icon': 'mdi:fan',
+                'state_class': 'measurement',
+            }
+            self.mqtt_publish(payload, 'sensor', fan_pct, create_config=create_config)
+
+        # Power sensor
+        if is_valid(gpu_data.get('power')):
+            power_usage = int(float(gpu_data['power'].replace('W', '').strip()))
+            payload = {
+                'name': f'{name} Power Usage',
+                'unit_of_measurement': 'W',
+                'icon': 'mdi:flash',
+                'state_class': 'measurement',
+            }
+            self.mqtt_publish(payload, 'sensor', power_usage, create_config=create_config)
+
+        # Temperature sensor
+        if is_valid(gpu_data.get('temp')):
+            temp = int(float(gpu_data['temp'].replace('°C', '').strip()))
+            payload = {
+                'name': f'{name} Temperature',
+                'unit_of_measurement': '°C',
+                'icon': 'mdi:thermometer',
+                'state_class': 'measurement',
+                'device_class': 'temperature',
+            }
+            self.mqtt_publish(payload, 'sensor', temp, create_config=create_config)
+
+        # GPU summary sensor with valid attributes
+        payload = {
+            'name': name,
+            'icon': 'mdi:gpu',
+        }
+        json_attributes = {k: v for k, v in gpu_data.items() if is_valid(v)}
+        self.mqtt_publish(payload, 'sensor', None, json_attributes, create_config=create_config)
+
+
+# Processes CPU utilization data and creates an MQTT sensor.
 async def cpuload(self, msg_data, create_config):
     prefs = Preferences(msg_data)
     state_value = int(prefs.as_dict()['cpu']['host'])
@@ -31,7 +122,7 @@ async def cpuload(self, msg_data, create_config):
     self.mqtt_publish(payload, 'sensor', state_value, create_config=create_config)
 
 
-# Processes disk temperature data and sends it as temperature sensors.
+# Processes disk temperature data and creates separate temperature sensors for each disk.
 async def disks(self, msg_data, create_config):
     prefs = Preferences(msg_data)
     disks = prefs.as_dict()
@@ -41,7 +132,7 @@ async def disks(self, msg_data, create_config):
         disk_name = disk['name']
         disk_temp = int(disk['temp']) if str(disk['temp']).isnumeric() else 0
 
-        # Correctly formats disk names for readability.
+        # Format disk names for readability
         match = re.match(r'([a-z_]+)([0-9]+)', disk_name, re.I)
         if match:
             disk_num = match[2]
@@ -55,14 +146,14 @@ async def disks(self, msg_data, create_config):
             'unit_of_measurement': '°C',
             'device_class': 'temperature',
             'icon': 'mdi:harddisk',
-            'state_class': 'measurement'
+            'state_class': 'measurement',
         }
-
         json_attributes = disk
+
         self.mqtt_publish(payload, 'sensor', disk_temp, json_attributes, create_config=create_config, retain=True)
 
 
-# Processes information about storage shares to calculate and send usage percentages.
+# Processes storage shares and calculates usage percentages, creating corresponding sensors.
 async def shares(self, msg_data, create_config):
     prefs = Preferences(msg_data)
     shares = prefs.as_dict()
@@ -77,31 +168,31 @@ async def shares(self, msg_data, create_config):
 
         # Handle cases where share caching is enabled
         if share_use_cache in ['no', 'yes', 'prefer']:
-            async with httpx.AsyncClient(verify=self.verify_ssl) as http:  # Use self.verify_ssl here
+            async with httpx.AsyncClient(verify=self.verify_ssl) as http:
                 headers = {'Cookie': self.unraid_cookie}
                 data = {
                     'compute': share_nameorig,
                     'path': 'Shares',
                     'all': 1,
-                    'csrf_token': self.csrf_token
+                    'csrf_token': self.csrf_token,
                 }
+
                 try:
-                    # Ensure the verify_ssl setting applies to this call
                     r = await http.request(
                         'GET',
                         url=f'{self.unraid_url}/webGui/include/ShareList.php',
                         data=data,
                         headers=headers,
-                        timeout=600
+                        timeout=600,
                     )
                 except httpx.RequestError as e:
-                    self.logger.error(f"Failed to request share data for '{share_name}': {e}")
+                    self.logger.error(f'Failed to request share data for "{share_name}": {e}')
                     continue
 
                 if r.status_code == httpx.codes.OK:
                     tree = etree.HTML(r.text)
 
-                    # Parses total and cache space used/free for shares
+                    # Calculate total and cache usage
                     size_total_used = tree.xpath(
                         f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[6]/text()'
                     )
@@ -128,7 +219,7 @@ async def shares(self, msg_data, create_config):
                     size_cache_free = next(iter(size_cache_free or []), '0').strip()
                     size_cache_free = humanfriendly.parse_size(size_cache_free)
 
-                    # Updates share usage based on calculated values
+                    # Update share usage values
                     share['used'] = int(size_total_used / 1000)
                     share['free'] = int((size_total_free - size_cache_free - size_cache_used) / 1000)
 
@@ -140,7 +231,6 @@ async def shares(self, msg_data, create_config):
 
         share_size_floor = share_disk_count * share_floor_size
         share['free'] -= share_size_floor
-
         share_size_total = share['used'] + share['free']
         share_used_pct = math.ceil((share['used'] / share_size_total) * 100)
 
@@ -148,10 +238,10 @@ async def shares(self, msg_data, create_config):
             'name': f'Share {share_name.title()} Usage',
             'unit_of_measurement': '%',
             'icon': 'mdi:folder-network',
-            'state_class': 'measurement'
+            'state_class': 'measurement',
         }
-
         json_attributes = share
+
         self.mqtt_publish(payload, 'sensor', share_used_pct, json_attributes, create_config=create_config, retain=True)
 
 
