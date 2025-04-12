@@ -14,6 +14,7 @@ from lxml import etree
 from gmqtt import Client as MQTTClient, Message
 from utils import load_file, normalize_str, handle_sigterm, compare_versions
 
+
 class UnRAIDServer:
     def __init__(self, mqtt_config, unraid_config, loop: asyncio.AbstractEventLoop):
         unraid_host = unraid_config.get('host')
@@ -42,7 +43,7 @@ class UnRAIDServer:
         self.verify_ssl = verify_ssl
         self.gpus = None
         self.gpu_task = None
-        
+
         self.connectivity_task = loop.create_task(self.periodic_connectivity_update())
 
         self.mqtt_connected = False
@@ -93,7 +94,6 @@ class UnRAIDServer:
         """
         Safely publish the "Connectivity" sensor state to MQTT.
         """
-        unraid_id = normalize_str(self.unraid_name)  # Normalize the server name
         status_payload = {
             'name': 'Connectivity',
             'device_class': 'connectivity',
@@ -139,7 +139,7 @@ class UnRAIDServer:
                     self.mqtt_status(connected=False)
             except Exception as e:
                 self.logger.exception(f'Error in periodic connectivity update: {e}')
-            
+
             # Wait before the next update
             await asyncio.sleep(60)  # Update every 60 seconds
 
@@ -242,7 +242,7 @@ class UnRAIDServer:
 
                     if response and response.status_code == 200:
                         gpu_data = response.json()
-                        self.logger.info(f'Parse GPU Statistics (plugin)')
+                        self.logger.info('Parse GPU Statistics (plugin)')
 
                         await parsers.gpu_stat(self, json.dumps(gpu_data), create_config=True)
                     else:
@@ -267,7 +267,7 @@ class UnRAIDServer:
                 response = await http_client.post(url, headers=headers, data=data, timeout=120)
             else:
                 raise ValueError('Unsupported HTTP method')
-            
+
             # Check if authentication failure occurred (e.g., expired/invalid cookie)
             if response.status_code in (401, 403):
                 self.logger.warning('Authentication failed, attempting to re-login...')
@@ -281,7 +281,7 @@ class UnRAIDServer:
                     response = await http_client.post(url, headers=headers, data=data, timeout=120)
 
             return response
-        
+
         except Exception as e:
             self.logger.exception(f'Request to {url} failed: {e}')
             return None
@@ -338,7 +338,7 @@ class UnRAIDServer:
                         match = re.search(r'gpustat_statusm\((\{.+?\})\)', gpu_content)
                         if match:
                             self.gpus = json.loads(match.group(1))
-                            self.logger.info(f'GPU Statistics (plugin) detected')
+                            self.logger.info('GPU Statistics (plugin) detected')
 
                     # Start GPU status fetching as a background task
                     if self.gpus and not self.gpu_task:
