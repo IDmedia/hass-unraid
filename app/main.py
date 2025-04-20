@@ -219,14 +219,14 @@ class UnRAIDServer:
 
         while True:
             try:
-                self.logger.info('Connecting to mqtt server...')
+                self.logger.info(f'Connecting to MQTT server... ({mqtt_host}:{mqtt_port})')
                 await self.mqtt_client.connect(mqtt_host, mqtt_port)
                 break
             except ConnectionRefusedError:
-                self.logger.error('Connection refused by mqtt server')
+                self.logger.error('Connection refused by MQTT server')
                 await asyncio.sleep(30)
             except Exception:
-                self.logger.exception('Failed to connect to mqtt server')
+                self.logger.exception('Failed to connect to MQTT server')
                 await asyncio.sleep(30)
 
     async def fetch_gpu_status(self):
@@ -307,7 +307,7 @@ class UnRAIDServer:
 
     async def ws_connect(self):
         while self.mqtt_connected:
-            self.logger.info('Connecting to unraid...')
+            self.logger.info(f'Connecting to Unraid... ({self.unraid_url})')
             last_msg = ''
             try:
                 # Only login if cookie is missing or invalid
