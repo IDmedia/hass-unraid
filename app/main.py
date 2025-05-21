@@ -162,9 +162,7 @@ class UnRAIDServer:
                 device['sw_version'] = self.unraid_version
 
             create_config = payload
-
-            if state_value is not None:
-                create_config['state_topic'] = f'unraid/{unraid_id}/{sensor_id}/state'
+            create_config['state_topic'] = f'unraid/{unraid_id}/{sensor_id}/state'
 
             if json_attributes:
                 create_config['json_attributes_topic'] = f'unraid/{unraid_id}/{sensor_id}/attributes'

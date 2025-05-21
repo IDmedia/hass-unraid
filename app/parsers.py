@@ -103,10 +103,13 @@ async def gpu_stat(self, msg_data, create_config):
         # GPU summary sensor with valid attributes
         payload = {
             'name': name,
-            'icon': 'mdi:gpu',
+            'icon': 'mdi:expansion-card',
+            'unit_of_measurement': '%',
+            'state_class': 'measurement',
         }
+        load_pct = int(float(gpu_data['util'].replace('%', '').strip()))
         json_attributes = {k: v for k, v in gpu_data.items() if is_valid(v)}
-        self.mqtt_publish(payload, 'sensor', None, json_attributes, create_config=create_config)
+        self.mqtt_publish(payload, 'sensor', load_pct, json_attributes, create_config=create_config)
 
 
 # Processes CPU utilization data and creates an MQTT sensor.
