@@ -9,17 +9,17 @@ from utils import Preferences
 
 
 # Default function for handling unknown types of data.
-async def default(self, msg_data, create_config):
+async def default(self, msg_data):
     pass
 
 
 # Handles session messages to extract CSRF tokens.
-async def session(self, msg_data, create_config):
+async def session(self, msg_data):
     self.csrf_token = msg_data
 
 
 # Processes GPU-related data and creates corresponding sensors dynamically.
-async def gpu_stat(self, msg_data, create_config):
+async def gpu_stat(self, msg_data):
     parsed_data = json.loads(msg_data)
 
     def is_valid(value):
@@ -50,7 +50,7 @@ async def gpu_stat(self, msg_data, create_config):
                 'icon': 'mdi:chart-line',
                 'state_class': 'measurement',
             }
-            self.mqtt_publish(payload, 'sensor', load_pct, create_config=create_config)
+            self.mqtt_publish(payload, 'sensor', load_pct)
 
         # Memory sensor
         if all(is_valid(gpu_data.get(key)) for key in ['memutil', 'memused', 'memtotal']):
@@ -64,7 +64,7 @@ async def gpu_stat(self, msg_data, create_config):
                 'state_class': 'measurement',
             }
             json_attributes = {'used': mem_used, 'total': mem_total}
-            self.mqtt_publish(payload, 'sensor', mem_pct, json_attributes, create_config=create_config)
+            self.mqtt_publish(payload, 'sensor', mem_pct, json_attributes)
 
         # Fan sensor
         if is_valid(gpu_data.get('fan')):
@@ -75,7 +75,7 @@ async def gpu_stat(self, msg_data, create_config):
                 'icon': 'mdi:fan',
                 'state_class': 'measurement',
             }
-            self.mqtt_publish(payload, 'sensor', fan_pct, create_config=create_config)
+            self.mqtt_publish(payload, 'sensor', fan_pct)
 
         # Power sensor
         if is_valid(gpu_data.get('power')):
@@ -86,7 +86,7 @@ async def gpu_stat(self, msg_data, create_config):
                 'icon': 'mdi:flash',
                 'state_class': 'measurement',
             }
-            self.mqtt_publish(payload, 'sensor', power_usage, create_config=create_config)
+            self.mqtt_publish(payload, 'sensor', power_usage)
 
         # Temperature sensor
         if is_valid(gpu_data.get('temp')):
@@ -98,7 +98,7 @@ async def gpu_stat(self, msg_data, create_config):
                 'state_class': 'measurement',
                 'device_class': 'temperature',
             }
-            self.mqtt_publish(payload, 'sensor', temp, create_config=create_config)
+            self.mqtt_publish(payload, 'sensor', temp)
 
         # GPU summary sensor with valid attributes
         payload = {
@@ -109,11 +109,11 @@ async def gpu_stat(self, msg_data, create_config):
         }
         load_pct = int(float(gpu_data['util'].replace('%', '').strip()))
         json_attributes = {k: v for k, v in gpu_data.items() if is_valid(v)}
-        self.mqtt_publish(payload, 'sensor', load_pct, json_attributes, create_config=create_config)
+        self.mqtt_publish(payload, 'sensor', load_pct, json_attributes)
 
 
 # Processes CPU utilization data and creates an MQTT sensor.
-async def cpuload(self, msg_data, create_config):
+async def cpuload(self, msg_data):
     prefs = Preferences(msg_data)
     state_value = int(prefs.as_dict()['cpu']['host'])
     payload = {
@@ -122,11 +122,11 @@ async def cpuload(self, msg_data, create_config):
         'icon': 'mdi:chip',
         'state_class': 'measurement',
     }
-    self.mqtt_publish(payload, 'sensor', state_value, create_config=create_config)
+    self.mqtt_publish(payload, 'sensor', state_value)
 
 
 # Processes disk temperature data and creates separate temperature sensors for each disk.
-async def disks(self, msg_data, create_config):
+async def disks(self, msg_data):
     prefs = Preferences(msg_data)
     disks = prefs.as_dict()
 
@@ -153,11 +153,11 @@ async def disks(self, msg_data, create_config):
         }
         json_attributes = disk
 
-        self.mqtt_publish(payload, 'sensor', disk_temp, json_attributes, create_config=create_config, retain=True)
+        self.mqtt_publish(payload, 'sensor', disk_temp, json_attributes, retain=True)
 
 
 # Processes storage shares and calculates usage percentages, creating corresponding sensors.
-async def shares(self, msg_data, create_config):
+async def shares(self, msg_data):
     prefs = Preferences(msg_data)
     shares = prefs.as_dict()
 
@@ -245,11 +245,11 @@ async def shares(self, msg_data, create_config):
         }
         json_attributes = share
 
-        self.mqtt_publish(payload, 'sensor', share_used_pct, json_attributes, create_config=create_config, retain=True)
+        self.mqtt_publish(payload, 'sensor', share_used_pct, json_attributes, retain=True)
 
 
 # Processes device temperature and fan speed data.
-async def temperature(self, msg_data, create_config):
+async def temperature(self, msg_data):
     tree = etree.HTML(msg_data)
     sensors = tree.xpath('.//span[@title]')
 
@@ -278,11 +278,11 @@ async def temperature(self, msg_data, create_config):
                     'device_class': 'temperature'
                 }
 
-            self.mqtt_publish(payload, 'sensor', device_value, create_config=create_config)
+            self.mqtt_publish(payload, 'sensor', device_value)
 
 
 # Processes RAM and memory-related data.
-async def update1(self, msg_data, create_config):
+async def update1(self, msg_data):
     memory_categories = ['RAM', 'Flash', 'Log', 'Docker']
 
     for (memory_name, memory_usage) in zip(memory_categories, re.findall(re.compile(r'(\d+%)'), msg_data)):
@@ -298,7 +298,7 @@ async def update1(self, msg_data, create_config):
                 'state_class': 'measurement'
             }
 
-            self.mqtt_publish(payload, 'sensor', memory_value, create_config=create_config)
+            self.mqtt_publish(payload, 'sensor', memory_value)
 
     for fan_id, fan_rpm in enumerate(re.findall(re.compile(r'(\d+ RPM)'), msg_data)):
         fan_id = fan_id + 1
@@ -316,11 +316,11 @@ async def update1(self, msg_data, create_config):
                 'state_class': 'measurement'
             }
 
-            self.mqtt_publish(payload, 'sensor', fan_value, create_config=create_config)
+            self.mqtt_publish(payload, 'sensor', fan_value)
 
 
 # Processes network throughput values.
-async def update3(self, msg_data, create_config):
+async def update3(self, msg_data):
     data = msg_data.replace('\n', '\\n')
     parsed_data = json.loads(data)
     network_download = 0
@@ -352,12 +352,12 @@ async def update3(self, msg_data, create_config):
             'state_class': 'measurement'
         }
 
-        self.mqtt_publish(payload_download, 'sensor', network_download, create_config=create_config)
-        self.mqtt_publish(payload_upload, 'sensor', network_upload, create_config=create_config)
+        self.mqtt_publish(payload_download, 'sensor', network_download)
+        self.mqtt_publish(payload_upload, 'sensor', network_upload)
 
 
 # Processes and sends UPS data.
-async def apcups(self, msg_data, create_config):
+async def apcups(self, msg_data):
     msg_data = msg_data.replace(r"\/", "/")
 
     parsed_data = json.loads(msg_data)
@@ -427,11 +427,11 @@ async def apcups(self, msg_data, create_config):
             if unit_of_measurement:
                 payload['unit_of_measurement'] = unit_of_measurement
 
-        self.mqtt_publish(payload, 'sensor', value, create_config=create_config)
+        self.mqtt_publish(payload, 'sensor', value)
 
 
 # Processes parity check data from unRAID.
-async def parity(self, msg_data, create_config):
+async def parity(self, msg_data):
     data = json.loads(msg_data)
     if len(data) < 5:
         return
@@ -457,11 +457,11 @@ async def parity(self, msg_data, create_config):
         'sync_errors_corrected': data[5]
     }
 
-    self.mqtt_publish(payload, 'sensor', state_value, json_attributes, create_config=create_config)
+    self.mqtt_publish(payload, 'sensor', state_value, json_attributes)
 
 
 # Processes and manages the state of the array as a binary sensor.
-async def var(self, msg_data, create_config):
+async def var(self, msg_data):
     msg_data = f'[var]\n{msg_data}'
 
     prefs = Preferences(msg_data)
@@ -478,4 +478,4 @@ async def var(self, msg_data, create_config):
     }
 
     json_attributes = var_json
-    self.mqtt_publish(payload, 'binary_sensor', var_value, json_attributes, create_config=create_config, retain=True)
+    self.mqtt_publish(payload, 'binary_sensor', var_value, json_attributes, retain=True)

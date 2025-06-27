@@ -12,7 +12,7 @@ import parsers
 import websockets
 from lxml import etree
 from gmqtt import Client as MQTTClient, Message
-from utils import load_file, normalize_str, handle_sigterm, compare_versions
+from utils import load_file, normalize_str, handle_sigterm, compare_versions, calculate_hash
 
 
 class UnRAIDServer:
@@ -27,13 +27,11 @@ class UnRAIDServer:
 
         self.unraid_version = ''
         self.unraid_version_min = '7.0.0'
-
         self.unraid_name = unraid_config.get('name')
         self.unraid_username = unraid_config.get('username')
         self.unraid_password = unraid_config.get('password')
         self.unraid_url = f'{unraid_protocol}{unraid_address}'
         self.unraid_ws = f'wss://{unraid_address}' if unraid_ssl else f'ws://{unraid_address}'
-
         self.scan_interval = unraid_config.get('scan_interval', 30)
         self.share_parser_lastrun = 0
         self.share_parser_interval = 3600
@@ -45,8 +43,9 @@ class UnRAIDServer:
         self.gpu_task = None
 
         self.connectivity_task = loop.create_task(self.periodic_connectivity_update())
-
         self.mqtt_connected = False
+        self.parser_hashes = {}
+
         unraid_id = normalize_str(self.unraid_name)
 
         will_message = Message(
@@ -55,6 +54,7 @@ class UnRAIDServer:
         self.mqtt_client = MQTTClient(self.unraid_name, will_message=will_message)
         asyncio.ensure_future(self.mqtt_connect(mqtt_config))
 
+        # Logging setup
         self.logger = logging.getLogger(self.unraid_name)
         self.logger.setLevel(logging.INFO)
 
@@ -64,17 +64,38 @@ class UnRAIDServer:
         )
         unraid_logger.setFormatter(unraid_logger_formatter)
         self.logger.addHandler(unraid_logger)
-
         self.loop = loop
 
+    def calculate_structure_hash(self, payload):
+        """
+        Generate a hash for configuration-relevant fields of the payload.
+        """
+        # Only include structural keys in the hash
+        structure_keys = ['name', 'icon', 'unit_of_measurement', 'state_class', 'device_class', 'expire_after']
+        filtered_payload = {key: value for key, value in payload.items() if key in structure_keys}
+        return calculate_hash(filtered_payload)
+
+    def has_structure_changed(self, sensor_name, payload):
+        """
+        Check if the configuration (structure) of the sensor has changed by comparing its hash.
+        Cache the hash to avoid redundant MQTT config publishes.
+        """
+        key = f"{self.unraid_name}_{sensor_name}"  # Ensure unique hash key
+        new_hash = self.calculate_structure_hash(payload)
+        old_hash = self.parser_hashes.get(key)
+
+        if old_hash != new_hash:
+            self.parser_hashes[key] = new_hash  # Update the cached hash
+            return True
+        return False
+
+    # MQTT handlers
     def on_connect(self, client, flags, rc, properties):
         self.logger.info('Successfully connected to MQTT server')
         self.mqtt_connected = True
+        self.mqtt_status(connected=True)
 
-        # Update the connectivity sensor and create its config if needed
-        self.mqtt_status(connected=True, create_config=True)
-
-        # Start the main UnRAID WebSocket connection task
+        # Start WebSocket connection task
         self.unraid_task = asyncio.ensure_future(self.ws_connect())
 
     def on_message(self, client, topic, payload, qos, properties):
@@ -90,115 +111,116 @@ class UnRAIDServer:
         except Exception as e:
             self.logger.exception(f'Failed to update connectivity status on disconnect: {e}')
 
-    def mqtt_status(self, connected, create_config=False):
-        """
-        Safely publish the "Connectivity" sensor state to MQTT.
-        """
+    # MQTT helpers
+    def mqtt_status(self, connected):
         status_payload = {
             'name': 'Connectivity',
             'device_class': 'connectivity',
         }
         state_value = 'ON' if connected else 'OFF'
 
-        # Avoid publishing the same state repeatedly
-        if hasattr(self, '_last_connectivity_state') and self._last_connectivity_state == state_value:
-            self.logger.debug(f'Skipping redundant mqtt_status update: {state_value}')
-            return
-        self._last_connectivity_state = state_value
-
-        # Ensure MQTT client is ready before publishing
-        if not self.mqtt_client or not self.mqtt_connected:
-            self.logger.warning('MQTT client is not ready, skipping mqtt_status update')
-            return
-
-        # Publish the state
-        self.logger.info(f'Publishing Connectivity state: {state_value}')
-        try:
-            self.mqtt_publish(
-                status_payload,
-                'binary_sensor',
-                state_value,
-                create_config=create_config,
-                retain=True  # Ensure message is retained
-            )
-        except Exception as e:
-            self.logger.exception(f'Failed to publish Connectivity state: {e}')
+        self.mqtt_publish(
+            status_payload, 
+            'binary_sensor', 
+            state_value, 
+            retain=True
+        )
 
     async def periodic_connectivity_update(self):
         """
-        Periodically refresh the "Connectivity" sensor state (even if unchanged)
-        to prevent Home Assistant from marking it as unavailable.
+        Periodically refresh the "Connectivity" sensor state, even if unchanged,
+        to ensure Home Assistant doesn't mark it as unavailable.
         """
-        self.logger.info('Starting periodic connectivity updates...')
+        self._last_connectivity_state = None  # Initialize cached state
+
         while True:
             try:
-                # Publish the current connectivity state periodically
-                if self.mqtt_connected:
-                    self.mqtt_status(connected=True)
-                else:
-                    self.mqtt_status(connected=False)
+                # Ensure MQTT client is ready before updating state
+                if not self.mqtt_client or not self.mqtt_connected:
+                    self.logger.warning("MQTT client is not connected; skipping connectivity update")
+                    await asyncio.sleep(60)
+                    continue
+
+                current_state = 'ON' if self.mqtt_connected else 'OFF'
+
+                # Only publish if the state has changed
+                if self._last_connectivity_state != current_state:
+                    self.logger.debug(f"Connectivity state changed to {current_state}")
+                    self.mqtt_status(connected=self.mqtt_connected)
+                    self._last_connectivity_state = current_state
+
             except Exception as e:
-                self.logger.exception(f'Error in periodic connectivity update: {e}')
+                self.logger.exception(f"Error during connectivity update: {e}")
 
-            # Wait before the next update
-            await asyncio.sleep(60)  # Update every 60 seconds
+            await asyncio.sleep(60)  # Refresh every 60 seconds
 
-    def mqtt_publish(
-        self, payload, sensor_type, state_value, json_attributes=None, create_config=False, retain=False
-    ):
+    def mqtt_publish(self, payload, sensor_type, state_value, json_attributes=None, retain=False):
+        """
+        Publish the MQTT state and configuration for a sensor. Dynamically handles configuration
+        updates when the structure of the sensor changes.
+        """
+        # Ensure the MQTT client is connected before publishing
+        if not self.mqtt_client or not self.mqtt_connected:
+            self.logger.warning(f"MQTT client is not ready; skipping publish for sensor: {payload['name']}")
+            return
+
+        # Dynamically normalize the unraid name and sensor name to ensure consistency
         unraid_id = normalize_str(self.unraid_name)
-        sensor_id = normalize_str(payload['name'])
-        unraid_sensor_id = f'{unraid_id}_{sensor_id}'
+        sensor_name = normalize_str(payload['name'])  # Sensor name derived from payload name
+        unraid_sensor_id = f"{unraid_id}_{sensor_name}"  # Combine for a fully scoped unique ID
 
-        if create_config:
-            device = {
-                'name': self.unraid_name,
-                'identifiers': f'unraid_{unraid_id}'.lower(),
-                'model': 'Unraid',
-                'manufacturer': 'Lime Technology',
-            }
+        # Define Home Assistant device attributes
+        device = {
+            'name': self.unraid_name,
+            'identifiers': f"unraid_{unraid_id}".lower(),
+            'model': 'Unraid',
+            'manufacturer': 'Lime Technology',
+        }
+        if self.unraid_version:  # Add the software version if available
+            device['sw_version'] = self.unraid_version
 
-            if self.unraid_version:
-                device['sw_version'] = self.unraid_version
+        # Prepare MQTT discovery payload
+        config_payload = payload.copy()
+        config_payload['state_topic'] = f"unraid/{unraid_id}/{sensor_name}/state"
+        if json_attributes:
+            config_payload['json_attributes_topic'] = f"unraid/{unraid_id}/{sensor_name}/attributes"
+        if sensor_type == 'button':
+            config_payload['command_topic'] = f"unraid/{unraid_id}/{sensor_name}/commands"
+        if not sensor_name.startswith(('connectivity', 'share_', 'disk_')):
+            config_payload['expire_after'] = max(self.scan_interval * 4, 120)
 
-            create_config = payload
-            create_config['state_topic'] = f'unraid/{unraid_id}/{sensor_id}/state'
-
-            if json_attributes:
-                create_config['json_attributes_topic'] = f'unraid/{unraid_id}/{sensor_id}/attributes'
-
-            if sensor_type == 'button':
-                create_config['command_topic'] = f'unraid/{unraid_id}/{sensor_id}/commands'
-
-            if not sensor_id.startswith(('connectivity', 'share_', 'disk_')):
-                expire_in_seconds = max(self.scan_interval * 4, 120)
-                create_config['expire_after'] = expire_in_seconds
-
-            config_fields = {
-                'name': f'{payload["name"]}',
+        # Check for structural changes and publish configuration dynamically
+        if self.has_structure_changed(unraid_sensor_id, config_payload):
+            self.logger.info(f"Publishing updated config for sensor '{payload['name']}'")
+            config_payload.update({
                 'attribution': 'Data provided by UNRAID',
                 'unique_id': unraid_sensor_id,
                 'device': device,
-            }
-
-            create_config.update(config_fields)
-
+            })
             self.mqtt_client.publish(
-                f'homeassistant/{sensor_type}/{unraid_sensor_id}/config', json.dumps(create_config), retain=True
+                f"homeassistant/{sensor_type}/{unraid_sensor_id}/config",
+                json.dumps(config_payload),
+                retain=True
             )
 
+        # Publish the sensor state topic (value updates sent here)
         if state_value is not None:
-            time.sleep(0.1)
-            self.mqtt_client.publish(f'unraid/{unraid_id}/{sensor_id}/state', state_value, retain=retain)
+            self.logger.debug(f"Publishing state for {sensor_name}: {state_value}")
+            self.mqtt_client.publish(f"unraid/{unraid_id}/{sensor_name}/state", state_value, retain=retain)
 
+        # Publish attributes, if present
         if json_attributes:
+            self.logger.debug(f"Publishing attributes for {sensor_name}: {json_attributes}")
             self.mqtt_client.publish(
-                f'unraid/{unraid_id}/{sensor_id}/attributes', json.dumps(json_attributes), retain=retain
+                f"unraid/{unraid_id}/{sensor_name}/attributes",
+                json.dumps(json_attributes),
+                retain=retain,
             )
 
+        # Subscribe to command topic for buttons
         if sensor_type == 'button':
             self.mqtt_client.subscribe(
-                f'unraid/{unraid_id}/{sensor_id}/commands', qos=0, retain=retain
+                f"unraid/{unraid_id}/{sensor_name}/commands", qos=0, retain=retain
             )
 
     async def mqtt_connect(self, mqtt_config):
@@ -242,7 +264,7 @@ class UnRAIDServer:
                         gpu_data = response.json()
                         self.logger.info('Parse GPU Statistics (plugin)')
 
-                        await parsers.gpu_stat(self, json.dumps(gpu_data), create_config=True)
+                        await parsers.gpu_stat(self, json.dumps(gpu_data))
                     else:
                         self.logger.warning(f'Failed to fetch GPU Statistics, status code: {response.status_code}')
 
@@ -418,7 +440,7 @@ class UnRAIDServer:
                             self.mqtt_history[sub_channel] = (
                                 time.time() - self.scan_interval
                             )
-                            self.loop.create_task(msg_parser(self, msg_data, create_config=True))
+                            self.loop.create_task(msg_parser(self, msg_data))
 
                         # Parse content periodically for the subchannel
                         if self.scan_interval <= (
@@ -426,7 +448,7 @@ class UnRAIDServer:
                         ):
                             self.logger.info(f'Parse data for {sub_channel}')
                             self.mqtt_history[sub_channel] = time.time()
-                            self.loop.create_task(msg_parser(self, msg_data, create_config=False))
+                            self.loop.create_task(msg_parser(self, msg_data))
 
             # Handle exceptions and connection issues
             except (httpx.ConnectTimeout, httpx.ConnectError):

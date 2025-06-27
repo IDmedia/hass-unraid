@@ -2,6 +2,7 @@ import os
 import re
 import json
 import yaml
+import hashlib
 import configparser
 
 
@@ -24,6 +25,10 @@ class Preferences:
         d = {k: v for k, v in d.items() if v}
 
         return d
+
+
+def calculate_hash(data):
+    return hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
 def handle_sigterm(*args):
