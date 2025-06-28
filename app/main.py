@@ -120,9 +120,9 @@ class UnRAIDServer:
         state_value = 'ON' if connected else 'OFF'
 
         self.mqtt_publish(
-            status_payload, 
-            'binary_sensor', 
-            state_value, 
+            status_payload,
+            'binary_sensor',
+            state_value,
             retain=True
         )
 
