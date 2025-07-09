@@ -4,6 +4,7 @@ import json
 import yaml
 import hashlib
 import configparser
+from functools import wraps
 
 
 class Preferences:
@@ -120,3 +121,32 @@ def load_file(path_to_file):
             return {}
 
     return data
+
+
+def log_errors(parser_name):
+    """
+    A decorator to catch and log errors along with the raw `msg_data`.
+
+    :param parser_name: Name of the parser being wrapped (used for logging purposes).
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(self, msg_data, *args, **kwargs):
+            try:
+                # Call the original parser function
+                return await func(self, msg_data, *args, **kwargs)
+            except Exception as e:
+                # Log the structured error message
+                self.logger.error(
+                    f'Error in parser "{parser_name}". Exception occurred: {type(e).__name__} - {e}'
+                )
+                self.logger.error(f'Raw msg_data causing the error:\n---\n{msg_data}\n---')
+
+                # Log full tracebacks in their own entry (to avoid inline interleaving)
+                self.logger.exception(f'Parser "{parser_name}" failed with error')
+                
+                # Prevent "Task exception was never retrieved" messages by fully handling the exception
+                # Suppress further propagation to the asyncio event loop
+                return None
+        return wrapper
+    return decorator

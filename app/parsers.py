@@ -5,20 +5,23 @@ import html
 import httpx
 import humanfriendly
 from lxml import etree
-from utils import Preferences
+from utils import Preferences, log_errors
 
 
 # Default function for handling unknown types of data.
+@log_errors('default')
 async def default(self, msg_data):
     pass
 
 
 # Handles session messages to extract CSRF tokens.
+@log_errors('session')
 async def session(self, msg_data):
     self.csrf_token = msg_data
 
 
 # Processes GPU-related data and creates corresponding sensors dynamically.
+@log_errors('gpu_stat')
 async def gpu_stat(self, msg_data):
     parsed_data = json.loads(msg_data)
 
@@ -113,6 +116,7 @@ async def gpu_stat(self, msg_data):
 
 
 # Processes CPU utilization data and creates an MQTT sensor.
+@log_errors('cpuload')
 async def cpuload(self, msg_data):
     prefs = Preferences(msg_data)
     state_value = int(prefs.as_dict()['cpu']['host'])
@@ -126,6 +130,7 @@ async def cpuload(self, msg_data):
 
 
 # Processes disk temperature data and creates separate temperature sensors for each disk.
+@log_errors('disks')
 async def disks(self, msg_data):
     prefs = Preferences(msg_data)
     disks = prefs.as_dict()
@@ -157,6 +162,7 @@ async def disks(self, msg_data):
 
 
 # Processes storage shares and calculates usage percentages, creating corresponding sensors.
+@log_errors('shares')
 async def shares(self, msg_data):
     prefs = Preferences(msg_data)
     shares = prefs.as_dict()
@@ -249,6 +255,7 @@ async def shares(self, msg_data):
 
 
 # Processes device temperature and fan speed data.
+@log_errors('temperature')
 async def temperature(self, msg_data):
     tree = etree.HTML(msg_data)
     sensors = tree.xpath('.//span[@title]')
@@ -282,6 +289,7 @@ async def temperature(self, msg_data):
 
 
 # Processes RAM and memory-related data.
+@log_errors('update1')
 async def update1(self, msg_data):
     memory_categories = ['RAM', 'Flash', 'Log', 'Docker']
 
@@ -320,6 +328,7 @@ async def update1(self, msg_data):
 
 
 # Processes network throughput values.
+@log_errors('update3')
 async def update3(self, msg_data):
     data = msg_data.replace('\n', '\\n')
     parsed_data = json.loads(data)
@@ -357,6 +366,7 @@ async def update3(self, msg_data):
 
 
 # Processes and sends UPS data.
+@log_errors('apcups')
 async def apcups(self, msg_data):
     msg_data = msg_data.replace(r"\/", "/")
 
@@ -431,6 +441,7 @@ async def apcups(self, msg_data):
 
 
 # Processes parity check data from unRAID.
+@log_errors('parity')
 async def parity(self, msg_data):
     data = json.loads(msg_data)
     if len(data) < 5:
@@ -461,6 +472,7 @@ async def parity(self, msg_data):
 
 
 # Processes and manages the state of the array as a binary sensor.
+@log_errors('var')
 async def var(self, msg_data):
     msg_data = f'[var]\n{msg_data}'
 
