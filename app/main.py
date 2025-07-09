@@ -21,10 +21,8 @@ class UnRAIDServer:
         unraid_port = unraid_config.get('port')
         unraid_ssl = unraid_config.get('ssl', False)
         verify_ssl = unraid_config.get('ssl_verify', True)
-
         unraid_address = f'{unraid_host}:{unraid_port}'
         unraid_protocol = 'https://' if unraid_ssl else 'http://'
-
         self.unraid_version = ''
         self.unraid_version_min = '7.0.0'
         self.unraid_name = unraid_config.get('name')
@@ -35,19 +33,16 @@ class UnRAIDServer:
         self.scan_interval = unraid_config.get('scan_interval', 30)
         self.share_parser_lastrun = 0
         self.share_parser_interval = 3600
-
         self.csrf_token = ''
         self.unraid_cookie = ''
         self.verify_ssl = verify_ssl
         self.gpus = None
         self.gpu_task = None
-
         self.connectivity_task = loop.create_task(self.periodic_connectivity_update())
         self.mqtt_connected = False
         self.parser_hashes = {}
-
+        self.login_lock = asyncio.Lock()
         unraid_id = normalize_str(self.unraid_name)
-
         will_message = Message(
             f'unraid/{unraid_id}/connectivity/state', 'OFF', retain=True
         )
@@ -57,7 +52,6 @@ class UnRAIDServer:
         # Logging setup
         self.logger = logging.getLogger(self.unraid_name)
         self.logger.setLevel(logging.INFO)
-
         unraid_logger = logging.StreamHandler(sys.stdout)
         unraid_logger_formatter = logging.Formatter(
             f'%(asctime)s [%(levelname)s] [{self.unraid_name}] %(message)s'
@@ -83,7 +77,6 @@ class UnRAIDServer:
         key = f"{self.unraid_name}_{sensor_name}"  # Ensure unique hash key
         new_hash = self.calculate_structure_hash(payload)
         old_hash = self.parser_hashes.get(key)
-
         if old_hash != new_hash:
             self.parser_hashes[key] = new_hash  # Update the cached hash
             return True
@@ -94,7 +87,10 @@ class UnRAIDServer:
         self.logger.info('Successfully connected to MQTT server')
         self.mqtt_connected = True
         self.mqtt_status(connected=True)
-
+        # Cancel previous WebSocket task if running
+        if hasattr(self, "unraid_task") and self.unraid_task:
+            self.unraid_task.cancel()
+            self.logger.warning("Canceled previous WebSocket task due to reconnection.")
         # Start WebSocket connection task
         self.unraid_task = asyncio.ensure_future(self.ws_connect())
 
@@ -104,7 +100,6 @@ class UnRAIDServer:
     def on_disconnect(self, client, packet, exc=None):
         self.logger.error('Disconnected from MQTT server')
         self.mqtt_connected = False
-
         # Safely update the connectivity sensor
         try:
             self.mqtt_status(connected=False)
@@ -118,7 +113,6 @@ class UnRAIDServer:
             'device_class': 'connectivity',
         }
         state_value = 'ON' if connected else 'OFF'
-
         self.mqtt_publish(
             status_payload,
             'binary_sensor',
@@ -132,15 +126,14 @@ class UnRAIDServer:
         to ensure Home Assistant doesn't mark it as unavailable.
         """
         self._last_connectivity_state = None  # Initialize cached state
-
         while True:
             try:
+
                 # Ensure MQTT client is ready before updating state
                 if not self.mqtt_client or not self.mqtt_connected:
                     self.logger.warning("MQTT client is not connected; skipping connectivity update")
                     await asyncio.sleep(60)
                     continue
-
                 current_state = 'ON' if self.mqtt_connected else 'OFF'
 
                 # Only publish if the state has changed
@@ -148,10 +141,8 @@ class UnRAIDServer:
                     self.logger.debug(f"Connectivity state changed to {current_state}")
                     self.mqtt_status(connected=self.mqtt_connected)
                     self._last_connectivity_state = current_state
-
             except Exception as e:
                 self.logger.exception(f"Error during connectivity update: {e}")
-
             await asyncio.sleep(60)  # Refresh every 60 seconds
 
     def mqtt_publish(self, payload, sensor_type, state_value, json_attributes=None, retain=False):
@@ -159,6 +150,7 @@ class UnRAIDServer:
         Publish the MQTT state and configuration for a sensor. Dynamically handles configuration
         updates when the structure of the sensor changes.
         """
+
         # Ensure the MQTT client is connected before publishing
         if not self.mqtt_client or not self.mqtt_connected:
             self.logger.warning(f"MQTT client is not ready; skipping publish for sensor: {payload['name']}")
@@ -228,15 +220,12 @@ class UnRAIDServer:
         mqtt_port = mqtt_config.get('port', 1883)
         mqtt_username = mqtt_config.get('username')
         mqtt_password = mqtt_config.get('password')
-
         self.mqtt_history = {}
         self.share_parser_lastrun = 0
-
         self.mqtt_client.on_connect = self.on_connect
         self.mqtt_client.on_message = self.on_message
         self.mqtt_client.on_disconnect = self.on_disconnect
         self.mqtt_client.set_auth_credentials(mqtt_username, mqtt_password)
-
         while True:
             try:
                 self.logger.info(f'Connecting to MQTT server... ({mqtt_host}:{mqtt_port})')
@@ -254,23 +243,18 @@ class UnRAIDServer:
         while self.mqtt_connected and self.gpus:
             try:
                 gpu_status_url = f'{self.unraid_url}/plugins/gpustat/gpustatusmulti.php?gpus={json.dumps(self.gpus)}'
-
                 async with httpx.AsyncClient(verify=self.verify_ssl) as http:
                     response = await self.make_authenticated_request(
                         http, method='GET', url=gpu_status_url
                     )
-
                     if response and response.status_code == 200:
                         gpu_data = response.json()
                         self.logger.info('Parse GPU Statistics (plugin)')
-
                         await parsers.gpu_stat(self, json.dumps(gpu_data))
                     else:
                         self.logger.warning(f'Failed to fetch GPU Statistics, status code: {response.status_code}')
-
             except Exception as e:
                 self.logger.exception(f'Error while fetching GPU status: {e}')
-
             await asyncio.sleep(5)
 
     async def make_authenticated_request(self, http_client, method, url, data=None):
@@ -279,7 +263,6 @@ class UnRAIDServer:
         attempt to re-login and retry the request.
         """
         headers = {'Cookie': self.unraid_cookie}
-
         try:
             if method == 'GET':
                 response = await http_client.get(url, headers=headers, timeout=120)
@@ -299,35 +282,34 @@ class UnRAIDServer:
                     response = await http_client.get(url, headers=headers, timeout=120)
                 elif method == 'POST':
                     response = await http_client.post(url, headers=headers, data=data, timeout=120)
-
             return response
-
         except Exception as e:
             self.logger.exception(f'Request to {url} failed: {e}')
             return None
 
     async def unraid_login(self):
         """Login and update the Unraid cookie."""
-        async with httpx.AsyncClient(verify=self.verify_ssl) as http:
-            payload = {'username': self.unraid_username, 'password': self.unraid_password}
-
-            try:
-                response = await http.post(f'{self.unraid_url}/login', data=payload, timeout=120)
-                self.unraid_cookie = response.headers.get('set-cookie')
-
-                if not self.unraid_cookie:
-                    self.logger.error('Failed to obtain Unraid login cookie')
-                    raise ValueError('Unraid login failed')
-
-                self.logger.info('Successfully logged into Unraid and updated cookie')
-
-            except Exception as e:
-                self.logger.exception(f'Login attempt failed: {e}')
-                raise
+        # Use the login lock
+        async with self.login_lock:
+            async with httpx.AsyncClient(verify=self.verify_ssl) as http:
+                payload = {'username': self.unraid_username, 'password': self.unraid_password}
+                try:
+                    response = await http.post(f'{self.unraid_url}/login', data=payload, timeout=120)
+                    self.unraid_cookie = response.headers.get('set-cookie')
+                    if not self.unraid_cookie:
+                        self.logger.error('Failed to obtain Unraid login cookie')
+                        raise ValueError('Unraid login failed')
+                    self.logger.info('Successfully logged into Unraid and updated cookie')
+                except Exception as e:
+                    self.logger.exception(f'Login attempt failed: {e}')
+                    raise
 
     async def ws_connect(self):
         while self.mqtt_connected:
             self.logger.info(f'Connecting to Unraid... ({self.unraid_url})')
+
+            # Start with an initial backoff
+            backoff = 5
             last_msg = ''
             try:
                 # Only login if cookie is missing or invalid
@@ -378,7 +360,6 @@ class UnRAIDServer:
                         f'Unsupported Unraid version: {self.unraid_version}. Requires version {self.unraid_version_min} or higher.'
                     )
                     sys.exit(1)
-
                 headers = {'Cookie': self.unraid_cookie}
                 subprotocols = ['ws+meta.nchan']
                 sub_channels = {
@@ -414,8 +395,10 @@ class UnRAIDServer:
                     # Listen for messages
                     while self.mqtt_connected:
                         data = await asyncio.wait_for(websocket.recv(), timeout=120)
+
                         # Store last message
                         last_msg = data
+
                         # Parse message id and content
                         msg_data = data.replace('\00', ' ').split('\n\n', 1)[1]
                         msg_ids = re.findall(r'([-\[\d\],]+,[-\[\d\],]*)|$', data)[0].split(',')
@@ -453,17 +436,21 @@ class UnRAIDServer:
             # Handle exceptions and connection issues
             except (httpx.ConnectTimeout, httpx.ConnectError):
                 self.logger.error(
-                    'Failed to connect to unraid due to a timeout or connection issue...'
+                    'Failed to connect to Unraid due to a timeout or connection issue...'
                 )
                 self.mqtt_status(connected=False)
-                await asyncio.sleep(30)
+                await asyncio.sleep(backoff)
+
+                # Exponential backoff capped at 5 minutes
+                backoff = min(backoff * 2, 300)
             except Exception:
                 self.logger.exception('Failed to connect to unraid due to an exception...')
                 self.logger.error('Last message received:')
                 self.logger.error(last_msg)
                 self.mqtt_status(connected=False)
-                await asyncio.sleep(30)
 
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)
 
 if __name__ == '__main__':
     signal.signal(signal.SIGTERM, handle_sigterm)

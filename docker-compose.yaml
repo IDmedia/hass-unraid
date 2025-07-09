@@ -4,7 +4,7 @@ services:
     cpuset: '16-27'
     network_mode: bridge
     restart: always
-    build: ./
+    # build: ./
     environment:
       - TZ=Europe/Oslo
     volumes:
