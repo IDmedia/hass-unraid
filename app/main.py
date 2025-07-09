@@ -452,6 +452,7 @@ class UnRAIDServer:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 300)
 
+
 if __name__ == '__main__':
     signal.signal(signal.SIGTERM, handle_sigterm)
 
