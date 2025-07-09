@@ -144,7 +144,7 @@ def log_errors(parser_name):
 
                 # Log full tracebacks in their own entry (to avoid inline interleaving)
                 self.logger.exception(f'Parser "{parser_name}" failed with error')
-                
+
                 # Prevent "Task exception was never retrieved" messages by fully handling the exception
                 # Suppress further propagation to the asyncio event loop
                 return None
