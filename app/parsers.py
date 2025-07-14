@@ -368,41 +368,51 @@ async def update3(self, msg_data):
 # Processes and sends UPS data.
 @log_errors('apcups')
 async def apcups(self, msg_data):
-    msg_data = msg_data.replace(r"\/", "/")
-
+    # Replace escaped characters and parse JSON
+    msg_data = msg_data.replace(r'\/', '/')
     parsed_data = json.loads(msg_data)
 
     def clean_html(value):
+        # Removes HTML tags and unescapes HTML entities
         return re.sub(r'<[^>]+>', '', html.unescape(value)).strip()
 
     def parse_timespan(value):
+        # Converts a human-readable timespan to minutes
         try:
-            timespan_seconds = humanfriendly.parse_timespan(value)
-            return int(timespan_seconds / 60)
+            return int(humanfriendly.parse_timespan(value) / 60)
         except humanfriendly.InvalidTimespan:
             return 0
 
+    def extract_percentage_or_number(value, default=0):
+        # Look for a percentage value (e.g., '19 %')
+        match_percentage = re.search(r'(\d+)\s*%', value)
+        if match_percentage:
+            return int(match_percentage.group(1))  # Return the number before '%'
+
+        # Otherwise, fall back to extracting the first numeric value
+        match_number = re.search(r'[\d.]+', value)
+        return int(float(match_number.group())) if match_number else default
+
+    # Clean and process input data
     ups_model = clean_html(parsed_data[0])
-    ups_model = "" if ups_model == "-" else ups_model
-
     ups_status = clean_html(parsed_data[1])
-    ups_status = "" if ups_status == "-" else ups_status
-
     battery_charge = clean_html(parsed_data[2])
     runtime_left = clean_html(parsed_data[3])
     nominal_power = clean_html(parsed_data[4])
     ups_load = clean_html(parsed_data[5])
     output_voltage = clean_html(parsed_data[6])
 
-    battery_charge = int(battery_charge.replace('%', '').strip()) if battery_charge != '-' else 0
+    # Transform data to appropriate formats
+    battery_charge = extract_percentage_or_number(battery_charge) if battery_charge != '-' else 0
     runtime_left = parse_timespan(runtime_left)
-    nominal_power = int(nominal_power) if nominal_power != '-' else 0
-    ups_load = int(ups_load.replace('%', '').strip()) if ups_load != '-' else 0
-    output_voltage = int(output_voltage) if output_voltage != '-' else 0
+    nominal_power = extract_percentage_or_number(nominal_power, default=0)
+    ups_load = extract_percentage_or_number(ups_load) if ups_load != '-' else 0
+    output_voltage = extract_percentage_or_number(output_voltage) if output_voltage != '-' else 0
 
+    # Create parsed data dictionary
     parsed_data = {
-        'Model': ups_model,
-        'Status': ups_status,
+        'Model': '' if ups_model == '-' else ups_model,
+        'Status': '' if ups_status == '-' else ups_status,
         'Battery Charge': battery_charge,
         'Runtime Left': runtime_left,
         'Nominal Power': nominal_power,
@@ -410,20 +420,24 @@ async def apcups(self, msg_data):
         'Output Voltage': output_voltage,
     }
 
+    # If model is empty, abort early
     if not parsed_data['Model']:
         return
 
+    # Publish each parsed key-value pair as a sensor
     for key, value in parsed_data.items():
         if key in ['Model', 'Status'] and not value:
             continue
 
         payload = {
             'name': f'UPS {key}',
-            'icon': 'mdi:power' if 'Status' in key or 'Power' in key else
-                    'mdi:battery' if 'Charge' in key or 'Battery' in key else
-                    'mdi:clock' if 'Runtime' in key else
-                    'mdi:percent' if 'Load' in key else
-                    'mdi:flash',
+            'icon': (
+                'mdi:power' if 'Status' in key or 'Power' in key else
+                'mdi:battery' if 'Charge' in key or 'Battery' in key else
+                'mdi:clock' if 'Runtime' in key else
+                'mdi:percent' if 'Load' in key else
+                'mdi:flash'
+            )
         }
 
         if isinstance(value, (int, float)):
@@ -437,6 +451,7 @@ async def apcups(self, msg_data):
             if unit_of_measurement:
                 payload['unit_of_measurement'] = unit_of_measurement
 
+        # Publish the payload to MQTT
         self.mqtt_publish(payload, 'sensor', value)
 
 
