@@ -241,7 +241,12 @@ async def shares(self, msg_data):
         share_size_floor = share_disk_count * share_floor_size
         share['free'] -= share_size_floor
         share_size_total = share['used'] + share['free']
-        share_used_pct = math.ceil((share['used'] / share_size_total) * 100)
+
+        # Prevent division by Zero Error
+        if share_size_total > 0:
+            share_used_pct = math.ceil((share['used'] / share_size_total) * 100)
+        else:
+            share_used_pct = 0
 
         payload = {
             'name': f'Share {share_name.title()} Usage',
