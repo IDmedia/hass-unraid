@@ -33,11 +33,13 @@ class UnRAIDServer:
         self.scan_interval = unraid_config.get('scan_interval', 30)
         self.share_parser_lastrun = 0
         self.share_parser_interval = 3600
+        self.array_data = {}
         self.csrf_token = ''
         self.unraid_cookie = ''
         self.verify_ssl = verify_ssl
         self.gpus = None
         self.gpu_task = None
+        self.array_update_task = loop.create_task(self.periodic_array_update())
         self.connectivity_task = loop.create_task(self.periodic_connectivity_update())
         self.mqtt_connected = False
         self.parser_hashes = {}
@@ -81,6 +83,29 @@ class UnRAIDServer:
             self.parser_hashes[key] = new_hash  # Update the cached hash
             return True
         return False
+
+    async def periodic_array_update(self):
+        """
+        Periodically refresh the "Array" binary sensor state and attributes 
+        to ensure they remain available in MQTT.
+        """
+        while True:
+            try:
+                # Re-publish the last known state and attributes
+                var_value = 'ON' if 'started' in self.array_data.get('mdstate', '').lower() else 'OFF'
+                payload = {
+                    'name': 'Array',
+                    'device_class': 'running',
+                }
+                json_attributes = self.array_data
+                self.mqtt_publish(payload, 'binary_sensor', var_value, json_attributes, retain=True)
+
+                self.logger.info("Republished 'Array' binary sensor and attributes.")
+            except Exception as e:
+                self.logger.exception("Failed to update 'Array' sensor periodically: ", exc_info=e)
+            
+            # Sleep for a specified interval before republishing
+            await asyncio.sleep(self.scan_interval)
 
     # MQTT handlers
     def on_connect(self, client, flags, rc, properties):
