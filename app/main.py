@@ -86,7 +86,7 @@ class UnRAIDServer:
 
     async def periodic_array_update(self):
         """
-        Periodically refresh the "Array" binary sensor state and attributes 
+        Periodically refresh the "Array" binary sensor state and attributes
         to ensure they remain available in MQTT.
         """
         while True:
@@ -103,7 +103,7 @@ class UnRAIDServer:
                 self.logger.info("Republished 'Array' binary sensor and attributes.")
             except Exception as e:
                 self.logger.exception("Failed to update 'Array' sensor periodically: ", exc_info=e)
-            
+
             # Sleep for a specified interval before republishing
             await asyncio.sleep(self.scan_interval)
 

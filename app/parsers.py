@@ -254,99 +254,6 @@ async def shares(self, msg_data):
         self.mqtt_publish(payload, 'sensor', share_used_pct, json_attributes, retain=True)
 
 
-# Processes storage shares and calculates usage percentages, creating corresponding sensors.
-@log_errors('shares')
-async def shares(self, msg_data):
-    prefs = Preferences(msg_data)
-    shares = prefs.as_dict()
-
-    for n in shares:
-        share = shares[n]
-        share_name = share['name']
-        share_disk_count = len(share['include'].split(','))
-        share_floor_size = share['floor']
-        share_nameorig = share['nameorig']
-        share_use_cache = share['usecache']
-
-        # Handle cases where share caching is enabled
-        if share_use_cache in ['no', 'yes', 'prefer']:
-            async with httpx.AsyncClient(verify=self.verify_ssl) as http:
-                headers = {'Cookie': self.unraid_cookie}
-                data = {
-                    'compute': share_nameorig,
-                    'path': 'Shares',
-                    'all': 1,
-                    'csrf_token': self.csrf_token,
-                }
-
-                try:
-                    r = await http.request(
-                        'GET',
-                        url=f'{self.unraid_url}/webGui/include/ShareList.php',
-                        data=data,
-                        headers=headers,
-                        timeout=600,
-                    )
-                except httpx.RequestError as e:
-                    self.logger.error(f'Failed to request share data for "{share_name}": {e}')
-                    continue
-
-                if r.status_code == httpx.codes.OK:
-                    tree = etree.HTML(r.text)
-
-                    # Calculate total and cache usage
-                    size_total_used = tree.xpath(
-                        f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[6]/text()'
-                    )
-                    size_total_used = next(iter(size_total_used or []), '0').strip()
-                    size_total_used = humanfriendly.parse_size(size_total_used)
-
-                    size_total_free = tree.xpath(
-                        f'//td/a[text()="{share_nameorig}"]/ancestor::tr[1]/td[7]/text()'
-                    )
-                    size_total_free = next(iter(size_total_free or []), '0').strip()
-                    size_total_free = humanfriendly.parse_size(size_total_free)
-
-                    size_cache_used = tree.xpath(
-                        f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1]'
-                        f'[not(contains(text(), "Disk "))]/../td[6]/text()'
-                    )
-                    size_cache_used = next(iter(size_cache_used or []), '0').strip()
-                    size_cache_used = humanfriendly.parse_size(size_cache_used)
-
-                    size_cache_free = tree.xpath(
-                        f'//td/a[text()="{share_nameorig}"]/following::tr[1]/td[1]'
-                        f'[not(contains(text(), "Disk "))]/../td[7]/text()'
-                    )
-                    size_cache_free = next(iter(size_cache_free or []), '0').strip()
-                    size_cache_free = humanfriendly.parse_size(size_cache_free)
-
-                    # Update share usage values
-                    share['used'] = int(size_total_used / 1000)
-                    share['free'] = int((size_total_free - size_cache_free - size_cache_used) / 1000)
-
-        if share['used'] == 0:
-            continue
-
-        if share.get('exclusive') in ['yes']:
-            share_disk_count = 1
-
-        share_size_floor = share_disk_count * share_floor_size
-        share['free'] -= share_size_floor
-        share_size_total = share['used'] + share['free']
-        share_used_pct = math.ceil((share['used'] / share_size_total) * 100)
-
-        payload = {
-            'name': f'Share {share_name.title()} Usage',
-            'unit_of_measurement': '%',
-            'icon': 'mdi:folder-network',
-            'state_class': 'measurement',
-        }
-        json_attributes = share
-
-        self.mqtt_publish(payload, 'sensor', share_used_pct, json_attributes, retain=True)
-
-
 # Processes device temperature and fan speed data.
 @log_errors('temperature')
 async def temperature(self, msg_data):
@@ -552,19 +459,16 @@ async def apcups(self, msg_data):
 @log_errors('parity')
 async def parity(self, msg_data):
     data = json.loads(msg_data)
-    
+
     # Ensure data has at least the required length
     if len(data) < 5:
         return
 
     # Parse current position
-    current_position_match = re.search(r'(.+?) \(([\d.]+)\s?%\)', data[2])
-    if not current_position_match:
-        # Log or handle the case where the current position format is invalid
-        return
-
-    position_size = current_position_match.group(1).strip()
-    position_pct = current_position_match.group(2).strip()
+    current_position = re.search(r'(.+?) \(([\d.]+)\s?%\)', data[2])
+    position_size = current_position.group(1).strip()
+    position_pct = current_position.group(2).strip()
+    state_value = float(position_pct)
 
     # State value as a float
     state_value = float(position_pct)
