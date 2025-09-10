@@ -17,6 +17,9 @@ This Docker container parses and forwards all WebSocket messages from your Unrai
 
 5. The "network-share" view in Home Assistant is much more intuitive than Unraid's "shares" tab, in my opinion.
 
+6. Get SMART alerts for critical attribute changes — even for SAS drives, which Unraid itself doesn’t natively support!
+
+
 <div align="center">
   <img src="extras/screenshot.png" width="250" alt="screenshot">
 </div>
@@ -112,6 +115,14 @@ Ensure button-card locates the templates by adding the following line to the top
 ```
 button_card_templates: !include_dir_merge_named lovelace/templates/button_card
 ```
+
+## Packages
+If you're looking to create fan speed sensors or set up SMART attribute notifications, check out the `packages` folder. The `UnRaid Smart Data` package caches SMART attributes for all disks, while the `Notify on SMART Attribute Change` automation sends a notification if any defined attribute changes state. This was developed because UnRAID doesn’t support SMART notifications for SAS drives, and I discovered too late that several of my disks had entries in the `Elements in grown defect list`.
+
+<div align="center">
+  <img src="extras/notifications.jpg" width="250" alt="notifications">
+</div>
+
 
 
 ### Feel free to contribute, report issues, or suggest improvements! If you find this repository useful, don't forget to star it :)

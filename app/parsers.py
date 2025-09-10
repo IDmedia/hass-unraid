@@ -2,10 +2,11 @@ import re
 import json
 import math
 import html
+import time
 import httpx
 import humanfriendly
 from lxml import etree
-from utils import Preferences, log_errors
+from utils import Preferences, log_errors, parse_smart_data
 
 
 # Default function for handling unknown types of data.
@@ -132,8 +133,16 @@ async def cpuload(self, msg_data):
 # Processes disk temperature data and creates separate temperature sensors for each disk.
 @log_errors('disks')
 async def disks(self, msg_data):
+    # Ensure a dictionary to hold persistent SMART attributes and their timestamps
+    if not hasattr(self, 'smart_attributes_store'):
+        self.smart_attributes_store = {}
+
+    if not hasattr(self, 'smart_parser_interval'):
+        self.smart_parser_interval = 3600  # Default interval in seconds
+
     prefs = Preferences(msg_data)
     disks = prefs.as_dict()
+    current_time = time.time()
 
     for n in disks:
         disk = disks[n]
@@ -146,9 +155,9 @@ async def disks(self, msg_data):
             disk_num = match[2]
             disk_name = match[1] if match[1] != 'disk' else None
             disk_name = ' '.join(filter(None, [disk_name, disk_num]))
-
         disk_name = disk_name.title().replace('_', ' ')
 
+        # Prepare base payload for disk attributes
         payload = {
             'name': f'Disk {disk_name}',
             'unit_of_measurement': '°C',
@@ -158,6 +167,57 @@ async def disks(self, msg_data):
         }
         json_attributes = disk
 
+        # Determine if SMART data should be fetched
+        fetch_smart_data = False
+        if disk['name'] not in self.smart_attributes_store:
+            # No cached data for this disk; fetch immediately
+            fetch_smart_data = True
+        else:
+            # Cached data exists; check the last update timestamp
+            last_update = self.smart_attributes_store[disk['name']]['last_update']
+            if current_time - last_update >= self.smart_parser_interval:
+                # Force update if interval has elapsed
+                fetch_smart_data = True
+
+        # Fetch SMART data if necessary
+        if fetch_smart_data:
+            async with httpx.AsyncClient(verify=self.verify_ssl) as http:
+                headers = {'Cookie': self.unraid_cookie}
+                data = {
+                    'cmd': 'attributes',
+                    'port': disk['device'],
+                    'name': disk['name'],
+                    'csrf_token': self.csrf_token,
+                }
+                try:
+                    response = await http.post(
+                        f'{self.unraid_url}/webGui/include/SmartInfo.php',
+                        data=data,
+                        headers=headers,
+                        timeout=120,
+                    )
+                    if response.status_code == 200:
+                        # Parse SMART data and store it persistently with a timestamp
+                        smart_attributes = parse_smart_data(response.text, self.logger)
+
+                        if len(smart_attributes) > 1:
+                            self.smart_attributes_store[disk['name']] = {
+                                'data': smart_attributes,
+                                'last_update': current_time,
+                            }
+                            self.logger.info(f"SMART data updated for disk '{disk_name}'")
+                    else:
+                        self.logger.warning(
+                            f"Failed to fetch SMART data for '{disk_name}', status code: {response.status_code}"
+                        )
+                except Exception as e:
+                    self.logger.error(f"Error fetching SMART data for '{disk['name']}': {e}")
+
+        # Merge persistent SMART attributes into current attributes
+        if disk['name'] in self.smart_attributes_store:
+            json_attributes['smart_attributes'] = self.smart_attributes_store[disk['name']]['data']
+
+        # Publish disk sensor with extended attributes
         self.mqtt_publish(payload, 'sensor', disk_temp, json_attributes, retain=True)
 
 

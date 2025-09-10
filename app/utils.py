@@ -4,6 +4,7 @@ import json
 import yaml
 import hashlib
 import configparser
+from lxml import etree
 from functools import wraps
 
 
@@ -104,6 +105,72 @@ def compare_versions(version1, version2):
 
     # Versions are equal
     return 0
+
+
+def parse_smart_data(html_data, logger):
+    """
+    Parses the SMART table HTML response and converts it into a snake_case key-value JSON format.
+    The key is the "Attribute Name" (converted to snake_case), and the value is extracted from
+    the rightmost column with data for that row. Numeric values are converted to int or float.
+    """
+    def to_snake_case(name):
+        """
+        Convert a given name to snake_case.
+        E.g., "Raw read error rate" -> "raw_read_error_rate"
+        """
+        return re.sub(r'\W+', '_', name).strip('_').lower()
+
+    def parse_value(value):
+        """
+        Convert a string to an int or float if it is numeric; otherwise, return the original string.
+        """
+        try:
+            # Try to parse as integer
+            return int(value)
+        except ValueError:
+            try:
+                # Try to parse as float
+                return float(value)
+            except ValueError:
+                # Return as-is if it's not a number
+                return value
+
+    try:
+        # Parse the provided HTML data
+        tree = etree.HTML(html_data)
+        rows = tree.xpath("//tr")
+
+        smart_data = {}
+        for row in rows:
+            # Extract all <td> columns in the current row
+            columns = row.xpath("td")
+            if len(columns) < 2:
+                continue  # Skip rows with insufficient data
+
+            # Extract "Attribute Name" (2nd column's text content)
+            attribute_name = columns[1].text.strip() if columns[1].text else ""
+            if not attribute_name:
+                continue  # Skip rows without a valid "Attribute Name"
+
+            # Convert the "Attribute Name" to snake_case
+            snake_case_attr_name = to_snake_case(attribute_name)
+
+            # Find the rightmost column with a non-empty value
+            value = None
+            for col in reversed(columns):  # Start from the last column and move left
+                cell_text = col.text.strip() if col.text else ""  # Get text for the cell
+                if cell_text:  # Check if the cell has text content
+                    value = parse_value(cell_text)  # Parse value as number if numeric
+                    break
+
+            # Add the Attribute Name (in snake_case) and its Value to the dictionary, if both are valid
+            if snake_case_attr_name and value is not None:
+                smart_data[snake_case_attr_name] = value
+
+        return smart_data
+    except Exception as e:
+        logger.error(f"Failed to parse SMART data: {e}")
+        return {}
 
 
 def load_file(path_to_file):

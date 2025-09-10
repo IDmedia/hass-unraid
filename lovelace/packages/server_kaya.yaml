@@ -3,3 +3,151 @@ template:
       - name: "Kaya Fan Speed"
         unit_of_measurement: "%"
         state: "{{ ([0, (100 * int(states('sensor.kaya_fan_1_speed')) / 2060) | round(0), 100]|sort)[1] }}"
+
+      - name: "Kaya Power Usage"
+        unit_of_measurement: "W"
+        state: "{{ states('sensor.kaya_monitor_power') | float | round }}"
+
+      - name: "Hisa Fan Speed"
+        unit_of_measurement: "%"
+        state: "{{ ([0, (100 * int(states('sensor.hisa_fan_1_speed')) / 2060) | round(0), 100]|sort)[1] }}"
+        
+      - name: "Hisa Power Usage"
+        unit_of_measurement: "W"
+        state: "{{ states('sensor.hisa_monitor_power') | float | round }}"
+
+  - sensor:
+      - name: "UnRaid Smart Data"
+        state: "{{ now() }}"
+        attributes:
+          # Just set the hostname to one or more servers
+          # it will be used to look for sensor.HOSTNAME_disk*
+          # For debugging (since it updates more often) add:
+          # 'total_lbas_written': smart.get('total_lbas_written'),
+          # 'total_lbas_read': smart.get('total_lbas_read'),
+          hosts: >
+            {% set hostnames = ['kaya', 'hisa'] %}
+            
+            {% set ns = namespace(hosts=[]) %}
+            {% for hostname in hostnames %}
+              {% set hn = namespace(disks=[]) %}
+              {% for entity in states.sensor %}
+                {% if entity.entity_id != this.entity_id
+                      and entity.entity_id.startswith('sensor.' ~ hostname ~ '_disk')
+                      and entity.attributes.device_class == 'temperature' %}
+                  {% set attrs = entity.attributes %}
+                  {% set smart = attrs.get('smart_attributes', {}) %}
+                  {% set disk = {
+                    'name': attrs.get('name'),
+                    'smart_attributes': {
+                      'reallocated_sector_count': smart.get('reallocated_sector_count'),
+                      'udma_crc_error_count': smart.get('udma_crc_error_count'),
+                      'elements_in_grown_defect_list': smart.get('elements_in_grown_defect_list'),
+                    },
+                  } %}
+                  {% set hn.disks = hn.disks + [disk] %}
+                {% endif %}
+              {% endfor %}
+              {% set ns.hosts = ns.hosts + [ { 'host': hostname, 'disks': hn.disks } ] %}
+            {% endfor %}
+            {{ ns.hosts }}
+
+
+automation:
+  - alias: Notify on SMART Attribute Change
+    mode: queued
+    trigger:
+      - platform: state
+        entity_id: sensor.unraid_smart_data
+    variables:
+      # Extract current and previous hosts arrays safely
+      new_hosts: >
+        {{ trigger.to_state.attributes.hosts
+           if trigger is defined and trigger.to_state is not none and 'hosts' in trigger.to_state.attributes
+           else [] }}
+      old_hosts: >
+        {{ trigger.from_state.attributes.hosts
+           if trigger is defined and trigger.from_state is not none and 'hosts' in trigger.from_state.attributes
+           else [] }}
+
+      # Flatten hosts -> disks and attach the host name to each disk
+      new_disks: >
+        {% set ns = namespace(out=[]) %}
+        {% for h in new_hosts %}
+          {% for d in h.get('disks', []) %}
+            {% if d.get('name') is not none %}
+              {% set dn = {
+                'host': h.get('host'),
+                'name': d.get('name'),
+                'friendly_name': d.get('friendly_name', d.get('name')),
+                'smart_attributes': d.get('smart_attributes', {})
+              } %}
+              {% set ns.out = ns.out + [ dn ] %}
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+        {{ ns.out }}
+
+      old_disks: >
+        {% set ns = namespace(out=[]) %}
+        {% for h in old_hosts %}
+          {% for d in h.get('disks', []) %}
+            {% if d.get('name') is not none %}
+              {% set dn = {
+                'host': h.get('host'),
+                'name': d.get('name'),
+                'friendly_name': d.get('friendly_name', d.get('name')),
+                'smart_attributes': d.get('smart_attributes', {})
+              } %}
+              {% set ns.out = ns.out + [ dn ] %}
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+        {{ ns.out }}
+
+      # Build notifications by comparing per-disk attributes between old and new, keyed by host+name
+      notifications: >
+        {% set ns = namespace(out=[]) %}
+        {% for new in new_disks %}
+          {% set old = (old_disks
+                        | selectattr('host','equalto', new.host)
+                        | selectattr('name','equalto', new.name)
+                        | list | first) %}
+          {% if old is not none %}
+            {% set new_attrs = new.smart_attributes if new.smart_attributes is defined else {} %}
+            {% set old_attrs = old.smart_attributes if old.smart_attributes is defined else {} %}
+            {% if new_attrs and old_attrs %}
+              {% for attr, new_val in new_attrs.items() %}
+                {% set old_val = old_attrs.get(attr) %}
+                {% if old_val is not none and new_val is not none and old_val != new_val %}
+                  {% set ns.out = ns.out + [ {
+                    'host': new.host,
+                    'disk': new.name,
+                    'attribute': attr,
+                    'old': old_val,
+                    'new': new_val
+                  } ] %}
+                {% endif %}
+              {% endfor %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.out }}
+    condition:
+      - condition: template
+        value_template: "{{ (new_disks | length) > 0 and (old_disks | length) > 0 }}"
+    action:
+      - repeat:
+          for_each: "{{ notifications }}"
+          sequence:
+            - service: notify.CHANGE_ME
+              data:
+                title: "{{ repeat.item.host | title }}: SMART Attribute Change"
+                message: >
+                  Disk: {{ repeat.item.disk | title }}\n
+                  Attribute: {{ repeat.item.attribute }}\n
+                  Value: {{ repeat.item.old }} -> {{ repeat.item.new }}
+                data:
+                  icon_url: '/local/images/unraid.png'
+                  priority: high
+                  ttl: 0

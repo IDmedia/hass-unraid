@@ -33,6 +33,9 @@ class UnRAIDServer:
         self.scan_interval = unraid_config.get('scan_interval', 30)
         self.share_parser_lastrun = 0
         self.share_parser_interval = 3600
+        self.smart_parser_lastrun = 0
+        self.smart_parser_interval = 3600
+        self.smart_attributes_store = {}
         self.array_data = {}
         self.csrf_token = ''
         self.unraid_cookie = ''
