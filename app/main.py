@@ -17,7 +17,6 @@ from utils import load_file, normalize_str, handle_sigterm, compare_versions, ca
 
 # Define path variables
 DATA_DIR = '../data'
-SMART_CACHE_FILE = os.path.join(DATA_DIR, 'smart_cache.json')
 
 
 class UnRAIDServer:
@@ -51,6 +50,8 @@ class UnRAIDServer:
         self.tasks_started = False
         self.parser_hashes = {}
         self.login_lock = asyncio.Lock()
+        unraid_id = normalize_str(self.unraid_name)
+        self.smart_cache_file = os.path.join(DATA_DIR, f'{unraid_id}_smart_cache.json')
 
         # Logging setup
         self.logger = logging.getLogger(self.unraid_name)
@@ -64,7 +65,6 @@ class UnRAIDServer:
         self.loop = loop
 
         # MQTT client
-        unraid_id = normalize_str(self.unraid_name)
         will_message = Message(
             f'unraid/{unraid_id}/connectivity/state', 'OFF', retain=True
         )
@@ -77,7 +77,7 @@ class UnRAIDServer:
     def save_smart_cache(self):
         """Save the SMART cache to disk."""
         try:
-            with open(SMART_CACHE_FILE, 'w') as cache_file:
+            with open(self.smart_cache_file, 'w') as cache_file:
                 json.dump(self.smart_attributes_store, cache_file, indent=2)
             self.logger.info('SMART cache saved to disk')
         except Exception as e:
@@ -85,9 +85,9 @@ class UnRAIDServer:
 
     def load_smart_cache(self):
         """Load the SMART cache from disk. If corrupted, initialize a fresh cache."""
-        if os.path.exists(SMART_CACHE_FILE):
+        if os.path.exists(self.smart_cache_file):
             try:
-                with open(SMART_CACHE_FILE, 'r') as cache_file:
+                with open(self.smart_cache_file, 'r') as cache_file:
                     self.smart_attributes_store = json.load(cache_file) or {}
                 self.logger.info('SMART cache successfully loaded from disk')
             except Exception as e:
