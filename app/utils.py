@@ -138,17 +138,17 @@ def parse_smart_data(html_data, logger):
     try:
         # Parse the provided HTML data
         tree = etree.HTML(html_data)
-        rows = tree.xpath("//tr")
+        rows = tree.xpath('//tr')
 
         smart_data = {}
         for row in rows:
             # Extract all <td> columns in the current row
-            columns = row.xpath("td")
+            columns = row.xpath('td')
             if len(columns) < 2:
                 continue  # Skip rows with insufficient data
 
             # Extract "Attribute Name" (2nd column's text content)
-            attribute_name = columns[1].text.strip() if columns[1].text else ""
+            attribute_name = columns[1].text.strip() if columns[1].text else ''
             if not attribute_name:
                 continue  # Skip rows without a valid "Attribute Name"
 
@@ -158,7 +158,7 @@ def parse_smart_data(html_data, logger):
             # Find the rightmost column with a non-empty value
             value = None
             for col in reversed(columns):  # Start from the last column and move left
-                cell_text = col.text.strip() if col.text else ""  # Get text for the cell
+                cell_text = col.text.strip() if col.text else ''  # Get text for the cell
                 if cell_text:  # Check if the cell has text content
                     value = parse_value(cell_text)  # Parse value as number if numeric
                     break
@@ -169,7 +169,7 @@ def parse_smart_data(html_data, logger):
 
         return smart_data
     except Exception as e:
-        logger.error(f"Failed to parse SMART data: {e}")
+        logger.error(f'Failed to parse SMART data: {e}')
         return {}
 
 

@@ -133,20 +133,26 @@ async def cpuload(self, msg_data):
 # Processes disk temperature data and creates separate temperature sensors for each disk.
 @log_errors('disks')
 async def disks(self, msg_data):
-    # Ensure a dictionary to hold persistent SMART attributes and their timestamps
-    if not hasattr(self, 'smart_attributes_store'):
-        self.smart_attributes_store = {}
-
-    if not hasattr(self, 'smart_parser_interval'):
-        self.smart_parser_interval = 3600  # Default interval in seconds
-
     prefs = Preferences(msg_data)
     disks = prefs.as_dict()
     current_time = time.time()
+    smart_cache_dirty = False  # Track if changes are made to the cache
 
+    # Cleanup `smart_attributes_store` to only include disks currently defined in `disks`
+    valid_disk_keys = {disk['name'] for disk in disks.values()}
+    invalid_entries = [
+        disk_name for disk_name in self.smart_attributes_store if disk_name not in valid_disk_keys
+    ]
+    for invalid_disk in invalid_entries:
+        del self.smart_attributes_store[invalid_disk]
+        self.logger.info(f'Removed stale SMART data for non-existent disk: {invalid_disk}')
+        smart_cache_dirty = True  # Changes were made (stale disks removed)
+
+    # Iterate through all disks
     for n in disks:
         disk = disks[n]
         disk_name = disk['name']
+        disk_transport = disk['transport']
         disk_temp = int(disk['temp']) if str(disk['temp']).isnumeric() else 0
 
         # Format disk names for readability
@@ -176,11 +182,10 @@ async def disks(self, msg_data):
             # Cached data exists; check the last update timestamp
             last_update = self.smart_attributes_store[disk['name']]['last_update']
             if current_time - last_update >= self.smart_parser_interval:
-                # Force update if interval has elapsed
-                fetch_smart_data = True
+                fetch_smart_data = True  # Force update if interval has elapsed
 
         # Fetch SMART data if necessary
-        if fetch_smart_data:
+        if fetch_smart_data and disk_temp > 0:  # Only fetch if SMART data is needed and temp is greater than 0
             async with httpx.AsyncClient(verify=self.verify_ssl) as http:
                 headers = {'Cookie': self.unraid_cookie}
                 data = {
@@ -194,24 +199,26 @@ async def disks(self, msg_data):
                         f'{self.unraid_url}/webGui/include/SmartInfo.php',
                         data=data,
                         headers=headers,
-                        timeout=120,
+                        timeout=30,
                     )
-                    if response.status_code == 200:
+                    if response.status_code == httpx.codes.OK:
                         # Parse SMART data and store it persistently with a timestamp
                         smart_attributes = parse_smart_data(response.text, self.logger)
-
                         if len(smart_attributes) > 1:
                             self.smart_attributes_store[disk['name']] = {
                                 'data': smart_attributes,
                                 'last_update': current_time,
                             }
-                            self.logger.info(f"SMART data updated for disk '{disk_name}'")
+                            smart_cache_dirty = True  # Mark cache as dirty because it was updated
+                            self.logger.info(f'SMART data updated for disk "{disk_name}"')
                     else:
                         self.logger.warning(
-                            f"Failed to fetch SMART data for '{disk_name}', status code: {response.status_code}"
+                            f'Failed to fetch SMART data for "{disk_name}", status code: {response.status_code}'
                         )
                 except Exception as e:
-                    self.logger.error(f"Error fetching SMART data for '{disk['name']}': {e}")
+                    self.logger.error(f'Error fetching SMART data for "{disk["name"]}": {e}')
+        elif fetch_smart_data and disk_temp == 0 and disk_transport != 'usb':
+            self.logger.info(f'Skipping pending SMART data fetch: Disk "{disk_name}" is spun down')
 
         # Merge persistent SMART attributes into current attributes
         if disk['name'] in self.smart_attributes_store:
@@ -219,6 +226,10 @@ async def disks(self, msg_data):
 
         # Publish disk sensor with extended attributes
         self.mqtt_publish(payload, 'sensor', disk_temp, json_attributes, retain=True)
+
+    # Save the SMART cache (only if dirty)
+    if smart_cache_dirty:
+        self.save_smart_cache()
 
 
 # Processes storage shares and calculates usage percentages, creating corresponding sensors.
@@ -598,5 +609,3 @@ async def var(self, msg_data):
     json_attributes = var_json
     self.array_data = var_json
     self.mqtt_publish(payload, 'binary_sensor', var_value, json_attributes, retain=True)
-
-    self.logger.info(f"Published 'Array' binary sensor with state '{var_value}' and attributes.")
