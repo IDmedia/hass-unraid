@@ -15,7 +15,7 @@ from .utils import load_file, setup_logger, normalize_str
 from .legacy_ws import LegacyAuth, LegacyWSRunner
 from .collectors.base import QueryCollector, SubscriptionCollector, EntityUpdate
 
-DATA_DIR = './data'
+DATA_DIR = '/data'
 
 
 class LegacyHTTPContext:
