@@ -15,7 +15,7 @@ from .utils import load_file, setup_logger, normalize_str
 from .legacy_ws import LegacyAuth, LegacyWSRunner
 from .collectors.base import QueryCollector, SubscriptionCollector, EntityUpdate
 
-DATA_DIR = '/data'
+DATA_DIR = './data'
 
 
 class LegacyHTTPContext:
@@ -63,7 +63,6 @@ class UnraidGraphQLIntegration:
         self.verify_ssl = verify_ssl
         self.endpoint_http = endpoint_http
         self.endpoint_ws = endpoint_ws
-        self.logger.info(f'SSL mode: {"https/wss" if use_ssl else "http/ws"}, verify_ssl={self.verify_ssl}')
 
         # SMART cache per node
         unraid_id = normalize_str(self.name)
@@ -78,6 +77,8 @@ class UnraidGraphQLIntegration:
 
         # Global stop coordination for this integration
         self._stop = asyncio.Event()
+
+        self.logger.info(f'SSL mode: {"https/wss" if use_ssl else "http/ws"}, verify_ssl={self.verify_ssl}')
 
         self.gql = GraphQLClient(endpoint_http, api_key, verify_ssl=verify_ssl, timeout=max(15, self.scan_interval))
         self.mqtt = MQTTPublisher(self.name, mqtt_config, loop, self.logger, self.scan_interval)
