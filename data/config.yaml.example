@@ -1,0 +1,25 @@
+unraid:
+  - name: Kaya
+    host: 192.168.1.10
+    port: 80
+    ssl: false
+    username: root
+    password: PASSWORD
+    api_key: VIEWER_ROLE_API_KEY
+    scan_interval: 30
+
+  - name: Hisa
+    host: 192.168.1.20
+    port: 80
+    ssl: true
+    ssl_verify: false
+    username: root
+    password: PASSWORD
+    api_key: VIEWER_ROLE_API_KEY
+    scan_interval: 30
+
+mqtt:
+  host: 192.168.1.100
+  port: 1883
+  username: USERNAME
+  password: PASSWORD

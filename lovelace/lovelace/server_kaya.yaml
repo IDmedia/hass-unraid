@@ -34,10 +34,14 @@ cards:
             card_mod:
               style: |
                 ha-card { border-style: none !important; border-radius: unset !important; }
-            image: /local/norco.svg
+            image: /local/images/norco.svg
             tap_action:
               action: none
-          - type: vertical-stack
+          - type: custom:vertical-stack-in-card
+            card_mod:
+              style:
+                .: |
+                  ha-card { border-style: none !important; }
             cards:
               - type: custom:button-card
                 entity: sensor.kaya_cpu_utilization
@@ -55,7 +59,7 @@ cards:
                   warning_from_state: 80
                   critical_from_state: 90
               - type: custom:button-card
-                entity: sensor.kaya_power_power
+                entity: sensor.kaya_power_usage
                 template: button_simple_bar
                 name: PWR
                 variables:

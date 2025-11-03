@@ -8,7 +8,7 @@ button_network_share:
     bar_color_background: '#E5E6E8'
   show_icon: false
   show_entity_picture: true
-  entity_picture: /local/share.png
+  entity_picture: /local/images/share.png
   name: >
     [[[
       if (isNaN(entity.state)) {

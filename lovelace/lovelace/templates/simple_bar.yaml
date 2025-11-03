@@ -1,24 +1,33 @@
 button_simple_bar:
   show_icon: false
-  show_state: true
+  show_state: false
   variables:
     name_padding: 50px
     state_padding: 50px
     max_value: 100
     warning_from_state: 50
     critical_from_state: 80
+    bar_height: '10px'
+    state_font_size: '1em'
+    bar_color_text: '#000'
     bar_color_normal: '#69B34C'
     bar_color_warning: '#FAB733'
     bar_color_critical: '#FF4E11'
     bar_color_background: '#E5E6E8'
+    reversed: false
+    state_position: outside  # Use 'inside' or 'outside'
+    bar_image: null
+    bar_image_size: '40px'
   state_display: >
     [[[
-      return (isNaN(entity.state)) ? '-' : `${entity.state}${entity.attributes.unit_of_measurement}`;
+      return (entity && !isNaN(entity.state))
+        ? `${entity.state}${entity.attributes.unit_of_measurement || ''}`
+        : '-';
     ]]]
   styles:
     grid:            
-      - grid-template-areas: '"n bar s"'
-      - grid-template-columns: auto 1fr auto
+      - grid-template-areas: '"img n bar s"'
+      - grid-template-columns: auto auto 1fr auto
       - grid-template-rows: auto
     card:
       - color: '#000'
@@ -35,16 +44,56 @@ button_simple_bar:
       - text-align: right
       - min-width: '[[[ return variables.state_padding ]]]'
   custom_fields:
+    img: >
+      [[[
+        if (variables.bar_image) {
+          return `<img src="${variables.bar_image}" style="width: ${variables.bar_image_size}; height: ${variables.bar_image_size}; object-fit: contain; margin-right: 13px; border-radius: 50%;">`;
+        }
+        return '';
+      ]]]
     bar: >
       [[[
-        let pctUsed = (isNaN(entity.state)) ? 100 : (100*(entity.state / variables.max_value));
+        if (!entity || isNaN(entity.state)) {
+          return `<div style="position: relative; background-color:${variables.bar_color_background}; width:${variables.state_position === 'outside' ? 'calc(100% - 50px)' : '100%'};">
+                    <div style="height:${variables.bar_height}; width:100%"></div>
+                  </div>`;
+        }
+        const pctUsed = Math.min(100, (entity.state / variables.max_value) * 100);
         let barColor = variables.bar_color_normal;
-        
-        barColor = (pctUsed > variables.warning_from_state ) ? variables.bar_color_warning : barColor;
-        barColor = (pctUsed > variables.critical_from_state ) ? variables.bar_color_critical : barColor;
-        barColor = (isNaN(entity.state)) ? variables.bar_color_background : barColor;
-        
-        return `<div style="background-color:${variables.bar_color_background}">
-                  <div style="background-color:${barColor};height:10px;width:${pctUsed}%"></div>
-                </div>`;
+        if (variables.reversed) {
+          // Reversed thresholds (e.g., for battery meters)
+          if (pctUsed < variables.warning_from_state) {
+            barColor = variables.bar_color_critical;
+          } else if (pctUsed < variables.critical_from_state) {
+            barColor = variables.bar_color_warning;
+          }
+        } else {
+          // Default thresholds (e.g., for CPU meters)
+          if (pctUsed > variables.critical_from_state) {
+            barColor = variables.bar_color_critical;
+          } else if (pctUsed > variables.warning_from_state) {
+            barColor = variables.bar_color_warning;
+          }
+        }
+        const stateDisplay = `${entity.state}${entity.attributes.unit_of_measurement || ''}`;
+        const barHeight = variables.bar_height;
+        const textColor = variables.bar_color_text;
+        const fontSize = variables.state_font_size;
+
+        if (variables.state_position === 'inside') {
+          // Inside the progress bar, but state remains fixed to the right
+          return `<div style="position: relative; background-color:${variables.bar_color_background}; width:100%; height: ${barHeight};">
+                    <div style="background-color:${barColor}; height:${barHeight}; width:${pctUsed}%;">
+                    </div>
+                    <span style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); color: ${textColor}; font-size: ${fontSize}; font-weight: bold; text-align: right;">${stateDisplay}</span>
+                  </div>`;
+        } else {  
+          // Outside the progress bar (default behavior)
+          return `<div style="display: flex; align-items: center; justify-content: space-between;">
+                    <div style="flex: 0 1 calc(100% - 50px); background-color:${variables.bar_color_background};">
+                      <div style="background-color:${barColor}; height:${barHeight}; width:${pctUsed}%;"></div>
+                    </div>
+                    <span style="flex: 0; margin-left: 10px; font-size: ${fontSize}; font-weight: bold; color: ${textColor}; text-align: right;">${stateDisplay}</span>
+                  </div>`;
+        }
       ]]]

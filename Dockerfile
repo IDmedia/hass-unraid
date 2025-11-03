@@ -1,6 +1,11 @@
-FROM python:3.9-slim
+FROM python:3.12-slim
+
+WORKDIR /opt
 
 VOLUME ["/data"]
-COPY ./app /app
-RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
-CMD ["python", "/app/main.py"]
+
+COPY ./app /opt/app
+
+RUN pip install --no-cache-dir --upgrade -r /opt/app/requirements.txt
+
+CMD ["python", "-m", "app.main"]

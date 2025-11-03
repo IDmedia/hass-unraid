@@ -1,549 +1,461 @@
+# app/main.py
 import os
-import re
-import sys
-import ssl
-import time
-import json
-import httpx
 import signal
+import pkgutil
 import asyncio
-import logging
-import parsers
-import websockets
-from lxml import etree
-from gmqtt import Client as MQTTClient, Message
-from utils import load_file, normalize_str, handle_sigterm, compare_versions, calculate_hash
+import importlib
+import ssl as ssl_mod
+from typing import Any, Dict, List
+
+from .gql_http import GraphQLClient
+from .mqtt_pub import MQTTPublisher
+from .smart_cache import SmartCache
+from .legacy.base import LegacyChannel
+from .utils import load_file, setup_logger, normalize_str
+from .legacy_ws import LegacyAuth, LegacyWSRunner
+from .collectors.base import QueryCollector, SubscriptionCollector, EntityUpdate
+
+DATA_DIR = '/data'
 
 
-# Define path variables
-DATA_DIR = '../data'
-
-
-class UnRAIDServer:
-    def __init__(self, mqtt_config, unraid_config, loop: asyncio.AbstractEventLoop):
-        unraid_host = unraid_config.get('host')
-        unraid_port = unraid_config.get('port')
-        unraid_ssl = unraid_config.get('ssl', False)
-        verify_ssl = unraid_config.get('ssl_verify', True)
-        unraid_address = f'{unraid_host}:{unraid_port}'
-        unraid_protocol = 'https://' if unraid_ssl else 'http://'
-        self.unraid_version = ''
-        self.unraid_version_min = '7.0.0'
-        self.unraid_name = unraid_config.get('name')
-        self.unraid_username = unraid_config.get('username')
-        self.unraid_password = unraid_config.get('password')
-        self.unraid_url = f'{unraid_protocol}{unraid_address}'
-        self.unraid_ws = f'wss://{unraid_address}' if unraid_ssl else f'ws://{unraid_address}'
-        self.scan_interval = unraid_config.get('scan_interval', 30)
-        self.share_parser_lastrun = 0
-        self.share_parser_interval = 3600
-        self.smart_parser_lastrun = 0
-        self.smart_parser_interval = 1800
-        self.smart_attributes_store = {}
-        self.array_data = {}
-        self.csrf_token = ''
-        self.unraid_cookie = ''
+class LegacyHTTPContext:
+    def __init__(self, http_base_url: str, verify_ssl: bool, auth, smart_cache=None):
+        self.http_base_url = http_base_url
         self.verify_ssl = verify_ssl
-        self.gpus = None
-        self.gpu_task = None
-        self.mqtt_connected = False
-        self.tasks_started = False
-        self.parser_hashes = {}
-        self.login_lock = asyncio.Lock()
-        unraid_id = normalize_str(self.unraid_name)
-        self.smart_cache_file = os.path.join(DATA_DIR, f'{unraid_id}_smart_cache.json')
+        self.auth = auth
+        self.smart_cache = smart_cache
 
-        # Logging setup
-        self.logger = logging.getLogger(self.unraid_name)
-        self.logger.setLevel(logging.INFO)
-        unraid_logger = logging.StreamHandler(sys.stdout)
-        unraid_logger_formatter = logging.Formatter(
-            '%(asctime)s [%(name)s] [%(levelname)-8s] %(message)s'
-        )
-        unraid_logger.setFormatter(unraid_logger_formatter)
-        self.logger.addHandler(unraid_logger)
+
+class UnraidGraphQLIntegration:
+    def __init__(self, mqtt_config: Dict[str, Any], unraid_cfg: Dict[str, Any], loop: asyncio.AbstractEventLoop):
         self.loop = loop
+        self.name = unraid_cfg.get('name', 'Unraid')
+        self.logger = setup_logger(self.name)
 
-        # MQTT client
-        will_message = Message(
-            f'unraid/{unraid_id}/connectivity/state', 'OFF', retain=True
-        )
-        self.mqtt_client = MQTTClient(self.unraid_name, will_message=will_message)
-        asyncio.ensure_future(self.mqtt_connect(mqtt_config))
+        host = unraid_cfg.get('host')
+        port = unraid_cfg.get('port', 80)
+        use_ssl = unraid_cfg.get('ssl', False)
+        verify_ssl = unraid_cfg.get('ssl_verify', True)
+        api_key = unraid_cfg.get('api_key')
+        if not api_key:
+            raise ValueError(f'{self.name}: api_key is required in config')
 
-        # Load SMART cache
-        self.load_smart_cache()
+        http_protocol = 'https' if use_ssl else 'http'
+        ws_protocol = 'wss' if use_ssl else 'ws'
+        endpoint_http = f'{http_protocol}://{host}:{port}/graphql'
+        endpoint_ws = f'{ws_protocol}://{host}:{port}/graphql'
 
-    def save_smart_cache(self):
-        """Save the SMART cache to disk."""
-        try:
-            with open(self.smart_cache_file, 'w') as cache_file:
-                json.dump(self.smart_attributes_store, cache_file, indent=2)
-            self.logger.info('SMART cache saved to disk')
-        except Exception as e:
-            self.logger.error(f'Failed to save SMART cache to disk: {e}')
+        # Legacy credentials (optional)
+        self.username = unraid_cfg.get('username')
+        self.password = unraid_cfg.get('password')
 
-    def load_smart_cache(self):
-        """Load the SMART cache from disk. If corrupted, initialize a fresh cache."""
-        if os.path.exists(self.smart_cache_file):
-            try:
-                with open(self.smart_cache_file, 'r') as cache_file:
-                    self.smart_attributes_store = json.load(cache_file) or {}
-                self.logger.info('SMART cache successfully loaded from disk')
-            except Exception as e:
-                self.logger.error(f'Failed to load SMART cache from disk: {e}')
-                self.smart_attributes_store = {}  # Initialize with an empty cache
+        self.legacy_auth = None
+        self.legacy_ws_runner = None
+        self.legacy_channels: List[LegacyChannel] = []
+        self._legacy_tasks: List[asyncio.Task] = []
+
+        # Build HTTP/WS base URLs for legacy (non-GraphQL)
+        self.legacy_http_base = f'{http_protocol}://{host}:{port}'
+        self.legacy_ws_base = f'{ws_protocol}://{host}:{port}'
+
+        self.scan_interval = int(unraid_cfg.get('scan_interval', 30))
+        self.api_key = api_key
+        self.verify_ssl = verify_ssl
+        self.endpoint_http = endpoint_http
+        self.endpoint_ws = endpoint_ws
+        self.logger.info(f'SSL mode: {"https/wss" if use_ssl else "http/ws"}, verify_ssl={self.verify_ssl}')
+
+        # SMART cache per node
+        unraid_id = normalize_str(self.name)
+        self.smart_cache = SmartCache(unraid_id, DATA_DIR, self.logger)
+
+        # Prepare LegacyAuth and legacy context once (no redundancy)
+        if self.username and self.password:
+            self.legacy_auth = LegacyAuth(self.legacy_http_base, self.username, self.password, self.verify_ssl, self.logger)
+            self.legacy_ctx = LegacyHTTPContext(self.legacy_http_base, self.verify_ssl, self.legacy_auth, smart_cache=self.smart_cache)
         else:
-            self.smart_attributes_store = {}  # Initialize with an empty cache if the file doesn't exist
+            self.legacy_ctx = None
 
-    def calculate_structure_hash(self, payload):
+        # Global stop coordination for this integration
+        self._stop = asyncio.Event()
+
+        self.gql = GraphQLClient(endpoint_http, api_key, verify_ssl=verify_ssl, timeout=max(15, self.scan_interval))
+        self.mqtt = MQTTPublisher(self.name, mqtt_config, loop, self.logger, self.scan_interval)
+
+        self.query_collectors: List[QueryCollector] = []
+        self.subscription_collectors: List[SubscriptionCollector] = []
+        self._query_tasks: List[asyncio.Task] = []
+        self._subscription_tasks: List[asyncio.Task] = []
+
+        # Load collector classes (do not start yet)
+        self._load_query_collectors()
+        self._load_subscription_collectors()
+        self._load_legacy_channels()
+
+    async def start(self):
         """
-        Generate a hash for configuration-relevant fields of the payload.
+        Fetch version (sw_version) first so device info includes it in initial discovery,
+        then start collectors.
         """
-        # Only include structural keys in the hash
-        structure_keys = ['name', 'icon', 'unit_of_measurement', 'state_class', 'device_class', 'expire_after']
-        filtered_payload = {key: value for key, value in payload.items() if key in structure_keys}
-        return calculate_hash(filtered_payload)
+        await self._fetch_version()
+        self._start_query_collectors()
+        self._start_subscription_collectors()
+        self._start_legacy_channels()
 
-    def has_structure_changed(self, sensor_name, payload):
-        """
-        Check if the configuration (structure) of the sensor has changed by comparing its hash.
-        Cache the hash to avoid redundant MQTT config publishes.
-        """
-        # Ensure unique hash key
-        key = f'{self.unraid_name}_{sensor_name}'
-        new_hash = self.calculate_structure_hash(payload)
-        old_hash = self.parser_hashes.get(key)
-        if old_hash != new_hash:
-            # Update the cached hash
-            self.parser_hashes[key] = new_hash
-            return True
-        return False
-
-    async def periodic_array_update(self):
-        """
-        Periodically refresh the "Array" binary sensor state and attributes
-        to ensure they remain available in MQTT.
-        """
-        while True:
-            try:
-                # Only proceed if MQTT is connected
-                if not self.mqtt_connected:
-                    self.logger.warning('MQTT client is not connected; skipping array update')
-                    await asyncio.sleep(5)  # Check again later
-                    continue
-
-                # Re-publish the last known state and attributes
-                var_value = 'ON' if 'started' in self.array_data.get('mdstate', '').lower() else 'OFF'
-                payload = {
-                    'name': 'Array',
-                    'device_class': 'running',
-                }
-                json_attributes = self.array_data
-                self.mqtt_publish(payload, 'binary_sensor', var_value, json_attributes, retain=True)
-                self.logger.info('Republished "Array" binary sensor and attributes')
-            except Exception as e:
-                self.logger.exception('Failed to update "Array" sensor periodically: ', exc_info=e)
-            # Sleep for a specified interval before republishing
-            await asyncio.sleep(self.scan_interval)
-
-    async def periodic_connectivity_update(self):
-        """
-        Periodically refresh the "Connectivity" sensor state, even if unchanged,
-        to ensure Home Assistant doesn't mark it as unavailable.
-        """
-        self._last_connectivity_state = None  # Initialize cached state
-        while True:
-            try:
-                # Ensure MQTT client is ready before updating state
-                if not self.mqtt_client or not self.mqtt_connected:
-                    self.logger.warning('MQTT client is not connected; skipping connectivity update')
-                    await asyncio.sleep(5)
-                    continue
-
-                current_state = 'ON' if self.mqtt_connected else 'OFF'
-                # Only publish if the state has changed
-                if self._last_connectivity_state != current_state:
-                    self.logger.debug(f'Connectivity state changed to {current_state}')
-                    self.mqtt_status(connected=self.mqtt_connected)
-                    self._last_connectivity_state = current_state
-            except Exception as e:
-                self.logger.exception(f'Error during connectivity update: {e}')
-            await asyncio.sleep(60)
-
-    # MQTT handlers
-    def on_connect(self, client, flags, rc, properties):
-        self.logger.info('Successfully connected to MQTT server')
-        self.mqtt_connected = True
-        self.mqtt_status(connected=True)
-
-        # Cancel any previous WebSocket task if running
-        if hasattr(self, 'unraid_task') and self.unraid_task:
-            self.unraid_task.cancel()
-            self.logger.warning('Canceled previous WebSocket task due to reconnection')
-
-        # Start WebSocket connection task
-        self.unraid_task = asyncio.ensure_future(self.ws_connect())
-
-        # Start delayed tasks only once
-        if not self.tasks_started:
-            self.logger.info('Starting periodic tasks')
-            self.array_update_task = self.loop.create_task(self.periodic_array_update())
-            self.connectivity_task = self.loop.create_task(self.periodic_connectivity_update())
-            self.tasks_started = True
-
-    def on_message(self, client, topic, payload, qos, properties):
-        self.logger.info(f'Message received: {topic}')
-
-    def on_disconnect(self, client, packet, exc=None):
-        self.logger.error('Disconnected from MQTT server')
-        self.mqtt_connected = False
-        # Safely update the connectivity sensor
+    async def _fetch_version(self):
         try:
-            self.mqtt_status(connected=False)
+            version = await self.gql.get_version()
+            if version:
+                self.logger.info(f'Unraid version detected: {version}')
+                self.mqtt.set_device_overrides({'sw_version': version})
+            else:
+                self.logger.warning('Unraid version not available from GraphQL Vars')
         except Exception as e:
-            self.logger.exception(f'Failed to update connectivity status on disconnect: {e}')
+            self.logger.error(f'Failed to fetch Unraid version: {e}')
 
-    # MQTT helpers
-    def mqtt_status(self, connected):
-        status_payload = {
-            'name': 'Connectivity',
-            'device_class': 'connectivity',
-        }
-        state_value = 'ON' if connected else 'OFF'
-        self.mqtt_publish(
-            status_payload,
-            'binary_sensor',
-            state_value,
-            retain=True
-        )
-
-    def mqtt_publish(self, payload, sensor_type, state_value, json_attributes=None, retain=False):
-        """
-        Publish the MQTT state and configuration for a sensor. Dynamically handles configuration
-        updates when the structure of the sensor changes.
-        """
-
-        # Ensure the MQTT client is connected before publishing
-        if not self.mqtt_client or not self.mqtt_connected:
-            self.logger.warning(f'MQTT client is not ready; skipping publish for sensor: {payload["name"]}')
+    def _load_legacy_channels(self):
+        loaded = 0
+        # Only attempt if credentials are present
+        if not (self.username and self.password):
+            self.logger.info('Legacy channels disabled (no username/password).')
+            return
+        try:
+            import app.legacy as legacy_pkg
+        except ImportError:
+            self.logger.info('No legacy package found (app/legacy). Skipping legacy channels.')
             return
 
-        # Dynamically normalize the unraid name and sensor name to ensure consistency
-        unraid_id = normalize_str(self.unraid_name)
-        sensor_name = normalize_str(payload['name'])
-        unraid_sensor_id = f'{unraid_id}_{sensor_name}'
-
-        # Define Home Assistant device attributes
-        device = {
-            'name': self.unraid_name,
-            'identifiers': f'unraid_{unraid_id}'.lower(),
-            'model': 'Unraid',
-            'manufacturer': 'Lime Technology',
-        }
-        if self.unraid_version:  # Add the software version if available
-            device['sw_version'] = self.unraid_version
-
-        # Prepare MQTT discovery payload
-        config_payload = payload.copy()
-        config_payload['state_topic'] = f'unraid/{unraid_id}/{sensor_name}/state'
-        if json_attributes:
-            config_payload['json_attributes_topic'] = f'unraid/{unraid_id}/{sensor_name}/attributes'
-        if sensor_type == 'button':
-            config_payload['command_topic'] = f'unraid/{unraid_id}/{sensor_name}/commands'
-        if not sensor_name.startswith(('connectivity', 'share_', 'disk_')):
-            config_payload['expire_after'] = max(self.scan_interval * 4, 120)
-
-        # Check for structural changes and publish configuration dynamically
-        if self.has_structure_changed(unraid_sensor_id, config_payload):
-            self.logger.info(f'Publishing updated config for sensor "{payload["name"]}"')
-            config_payload.update({
-                'attribution': 'Data provided by UNRAID',
-                'unique_id': unraid_sensor_id,
-                'device': device,
-            })
-            self.mqtt_client.publish(
-                f'homeassistant/{sensor_type}/{unraid_sensor_id}/config',
-                json.dumps(config_payload),
-                retain=True
-            )
-
-        # Publish the sensor state topic (value updates sent here)
-        if state_value is not None:
-            self.logger.debug(f'Publishing state for {sensor_name}: {state_value}')
-            self.mqtt_client.publish(f'unraid/{unraid_id}/{sensor_name}/state', state_value, retain=retain)
-
-        # Publish attributes, if present
-        if json_attributes:
-            self.logger.debug(f'Publishing attributes for {sensor_name}: {json_attributes}')
-            self.mqtt_client.publish(
-                f'unraid/{unraid_id}/{sensor_name}/attributes',
-                json.dumps(json_attributes),
-                retain=retain,
-            )
-
-        # Subscribe to command topic for buttons
-        if sensor_type == 'button':
-            self.mqtt_client.subscribe(
-                f'unraid/{unraid_id}/{sensor_name}/commands', qos=0, retain=retain
-            )
-
-    async def mqtt_connect(self, mqtt_config):
-        mqtt_host = mqtt_config.get('host')
-        mqtt_port = mqtt_config.get('port', 1883)
-        mqtt_username = mqtt_config.get('username')
-        mqtt_password = mqtt_config.get('password')
-        self.mqtt_history = {}
-        self.share_parser_lastrun = 0
-        self.mqtt_client.on_connect = self.on_connect
-        self.mqtt_client.on_message = self.on_message
-        self.mqtt_client.on_disconnect = self.on_disconnect
-        self.mqtt_client.set_auth_credentials(mqtt_username, mqtt_password)
-        while True:
+        for _, module_name, ispkg in pkgutil.iter_modules(legacy_pkg.__path__):
+            if ispkg:
+                continue
+            full_module = f'{legacy_pkg.__name__}.{module_name}'
             try:
-                self.logger.info(f'Connecting to MQTT server... ({mqtt_host}:{mqtt_port})')
-                await self.mqtt_client.connect(mqtt_host, mqtt_port)
-                break
-            except ConnectionRefusedError:
-                self.logger.error('Connection refused by MQTT server')
-                await asyncio.sleep(30)
-            except Exception:
-                self.logger.exception('Failed to connect to MQTT server')
-                await asyncio.sleep(30)
-
-    async def fetch_gpu_status(self):
-        """Fetch GPU status periodically."""
-        while self.mqtt_connected and self.gpus:
-            try:
-                gpu_status_url = f'{self.unraid_url}/plugins/gpustat/gpustatusmulti.php?gpus={json.dumps(self.gpus)}'
-                async with httpx.AsyncClient(verify=self.verify_ssl) as http:
-                    response = await self.make_authenticated_request(
-                        http, method='GET', url=gpu_status_url
-                    )
-                    if response and response.status_code == 200:
-                        gpu_data = response.json()
-                        self.logger.info('Parse GPU Statistics (plugin)')
-                        await parsers.gpu_stat(self, json.dumps(gpu_data))
-                    else:
-                        self.logger.warning(f'Failed to fetch GPU Statistics, status code: {response.status_code}')
+                mod = importlib.import_module(full_module)
+                channel_cls = getattr(mod, 'CHANNEL', None)
+                if channel_cls is None:
+                    continue
+                instance = channel_cls(self.logger, self.scan_interval)
+                self.legacy_channels.append(instance)
+                loaded += 1
+                self.logger.info(f'Loaded legacy channel: {instance.name}')
             except Exception as e:
-                self.logger.exception(f'Error while fetching GPU status: {e}')
-            await asyncio.sleep(5)
+                self.logger.error(f'Failed to load legacy channel {full_module}: {e}')
+        if loaded == 0:
+            self.logger.info('No legacy channels found.')
 
-    async def make_authenticated_request(self, http_client, method, url, data=None):
+    def _load_query_collectors(self):
         """
-        Perform an HTTP request with the current cookie. If the cookie is expired or invalid,
-        attempt to re-login and retry the request.
+        Auto-load collectors and pass optional dependencies:
+          - legacy_ctx for collectors declaring requires_legacy_auth = True
+          - smart_cache for collectors declaring uses_smart_cache = True
         """
-        headers = {'Cookie': self.unraid_cookie}
+        loaded = 0
         try:
-            if method == 'GET':
-                response = await http_client.get(url, headers=headers, timeout=120)
-            elif method == 'POST':
-                response = await http_client.post(url, headers=headers, data=data, timeout=120)
-            else:
-                raise ValueError('Unsupported HTTP method')
+            import app.collectors as collectors_pkg
+        except ImportError as e:
+            self.logger.error(f'Collectors package not found: {e}')
+            return
 
-            # Check if authentication failure occurred (e.g., expired/invalid cookie)
-            if response.status_code in (401, 403):
-                self.logger.warning('Authentication failed, attempting to re-login...')
-                await self.unraid_login()
-
-                # Retry the request with the new cookie
-                headers['Cookie'] = self.unraid_cookie
-                if method == 'GET':
-                    response = await http_client.get(url, headers=headers, timeout=120)
-                elif method == 'POST':
-                    response = await http_client.post(url, headers=headers, data=data, timeout=120)
-            return response
-        except Exception as e:
-            self.logger.exception(f'Request to {url} failed: {e}')
-            return None
-
-    async def unraid_login(self):
-        """Login and update the Unraid cookie."""
-        # Use the login lock
-        async with self.login_lock:
-            async with httpx.AsyncClient(verify=self.verify_ssl) as http:
-                payload = {'username': self.unraid_username, 'password': self.unraid_password}
-                try:
-                    response = await http.post(f'{self.unraid_url}/login', data=payload, timeout=120)
-                    self.unraid_cookie = response.headers.get('set-cookie')
-                    if not self.unraid_cookie:
-                        self.logger.error('Failed to obtain Unraid login cookie')
-                        raise ValueError('Unraid login failed')
-                    self.logger.info('Successfully logged into Unraid and updated cookie')
-                except Exception as e:
-                    self.logger.exception(f'Login attempt failed: {e}')
-                    raise
-
-    async def ws_connect(self):
-        while self.mqtt_connected:
-            self.logger.info(f'Connecting to Unraid... ({self.unraid_url})')
-
-            # Start with an initial backoff
-            backoff = 5
-            last_msg = ''
+        for _, module_name, ispkg in pkgutil.iter_modules(collectors_pkg.__path__):
+            if ispkg or module_name == 'base':
+                continue
+            full_module = f'{collectors_pkg.__name__}.{module_name}'
             try:
-                # Only login if cookie is missing or invalid
-                if not self.unraid_cookie:
-                    await self.unraid_login()
+                mod = importlib.import_module(full_module)
+                collector_cls = getattr(mod, 'COLLECTOR', None)
+                if collector_cls is None:
+                    continue
 
-                # Check Unraid version and GPU data
-                async with httpx.AsyncClient(verify=self.verify_ssl) as http:
-                    r = await http.get(
-                        f'{self.unraid_url}/Dashboard', headers={'Cookie': self.unraid_cookie}, timeout=120
+                requires_legacy = getattr(collector_cls, 'requires_legacy_auth', False)
+                uses_smart = getattr(collector_cls, 'uses_smart_cache', False)
+
+                kwargs = {}
+                if requires_legacy and self.legacy_ctx:
+                    kwargs['legacy_ctx'] = self.legacy_ctx
+                if uses_smart:
+                    kwargs['smart_cache'] = self.smart_cache
+
+                # Instantiate with flexible kwargs
+                instance = collector_cls(self.gql, self.logger, self.scan_interval, **kwargs)
+                self.query_collectors.append(instance)
+                loaded += 1
+                self.logger.info(f'Loaded query collector: {instance.name}')
+            except Exception as e:
+                self.logger.error(f'Failed to load collector {full_module}: {e}')
+
+        if loaded == 0:
+            self.logger.warning('No query collectors loaded. Ensure app/collectors has modules and __init__.py.')
+
+    def _load_subscription_collectors(self):
+        loaded = 0
+        try:
+            import app.subscriptions as subs_pkg
+        except ImportError:
+            self.logger.info('No subscriptions package found (app/subscriptions). Skipping subscriptions.')
+            return
+
+        for _, module_name, ispkg in pkgutil.iter_modules(subs_pkg.__path__):
+            if ispkg:
+                continue
+            full_module = f'{subs_pkg.__name__}.{module_name}'
+            try:
+                mod = importlib.import_module(full_module)
+                subs_cls = getattr(mod, 'SUBSCRIPTION', None)
+                if subs_cls is None:
+                    continue
+                instance = subs_cls(self.logger, self.scan_interval)
+                self.subscription_collectors.append(instance)
+                loaded += 1
+                self.logger.info(f'Loaded subscription collector: {instance.name}')
+            except Exception as e:
+                self.logger.error(f'Failed to load subscription {full_module}: {e}')
+        if loaded == 0:
+            self.logger.info('No subscription collectors found.')
+
+    def _start_legacy_channels(self):
+        if not self.legacy_channels or not self.legacy_auth:
+            return
+        # Prepare runner once; reuse existing LegacyAuth
+        self.legacy_ws_runner = LegacyWSRunner(
+            base_ws_url=self.legacy_ws_base,
+            http_base_url=self.legacy_http_base,
+            verify_ssl=self.verify_ssl,
+            auth=self.legacy_auth,
+            logger=self.logger
+        )
+        for ch in self.legacy_channels:
+            task = asyncio.create_task(self._run_legacy_channel(ch))
+            self._legacy_tasks.append(task)
+
+    async def _run_legacy_channel(self, channel: LegacyChannel):
+        """
+        Run one Nchan channel with immediate-first publish then throttled cadence.
+        """
+        await self.legacy_ws_runner.run_channel(
+            channel_name=channel.channel,
+            parse_fn=channel.parse,
+            publish_fn=self.mqtt.publish,
+            interval_seconds=max(1, int(getattr(channel, 'interval', self.scan_interval))),
+            stop_event=self._stop
+        )
+
+    def _start_query_collectors(self):
+        for collector in self.query_collectors:
+            task = asyncio.create_task(self._run_query_collector(collector))
+            self._query_tasks.append(task)
+
+    def _start_subscription_collectors(self):
+        for collector in self.subscription_collectors:
+            task = asyncio.create_task(self._run_subscription_collector(collector))
+            self._subscription_tasks.append(task)
+
+    async def _run_query_collector(self, collector: QueryCollector):
+        interval = max(1, int(getattr(collector, 'interval', self.scan_interval)))
+        while not self._stop.is_set():
+            try:
+                data = await collector.fetch()
+                updates: List[EntityUpdate] = await collector.parse(data) or []
+                for upd in updates:
+                    self.mqtt.publish(
+                        payload=upd.payload,
+                        sensor_type=upd.sensor_type,
+                        state_value=upd.state,
+                        json_attributes=upd.attributes,
+                        retain=upd.retain,
+                        device_overrides=upd.device_overrides,
+                        unique_id_suffix=upd.unique_id_suffix,
+                        expire_after=upd.expire_after
                     )
-                    tree = etree.HTML(r.text)
+            except Exception as e:
+                self.logger.error(f'Collector "{collector.name}" run failed: {e}')
+            # Sleep until next tick, but allow fast exit
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
 
-                    # Extract the Unraid version
-                    user_profile_elem = tree.xpath('.//unraid-user-profile')
-                    if user_profile_elem:
-                        server_data = user_profile_elem[0].get('server')
-                        if server_data:
-                            server_data = json.loads(server_data.replace('&quot;', '"'))
-                            self.unraid_version = server_data.get('osVersion', 'Unknown')
-                        else:
-                            self.unraid_version = 'Unknown'
+    async def _run_subscription_collector(self, collector: SubscriptionCollector):
+        """
+        Persistent WebSocket subscription with immediate-first publish and interval throttling.
+        Graceful stop: exits when self._stop is set or when the subscription ends.
+        """
+        from gql import Client, gql
+        from gql.transport.websockets import WebsocketsTransport
+        import asyncio
 
-                    # Extract GPU information from "gpustat_statusm"
-                    gpu_script = tree.xpath('.//script[contains(text(), "gpustat_statusm")]')
-                    if gpu_script:
-                        gpu_content = gpu_script[0].text
-                        match = re.search(r'gpustat_statusm\((\{.+?\})\)', gpu_content)
-                        if match:
-                            self.gpus = json.loads(match.group(1))
-                            self.logger.info('GPU Statistics (plugin) detected')
+        base_interval = max(1, int(getattr(collector, 'interval', self.scan_interval)))
+        backoff = 5
 
-                    # Start GPU status fetching as a background task
-                    if self.gpus and not self.gpu_task:
-                        self.gpu_task = asyncio.create_task(self.fetch_gpu_status())
+        while not self._stop.is_set():
+            stop_local = asyncio.Event()
+            event_queue: asyncio.Queue = asyncio.Queue(maxsize=1)  # buffer only latest event
 
-                # Check if the Unraid version is unsupported
-                comparison_result = compare_versions(self.unraid_version, self.unraid_version_min)
-
-                # Handle invalid versions explicitly
-                if comparison_result is None:
-                    self.logger.error(f'Invalid Unraid version detected: "{self.unraid_version}"')
-                    sys.exit(1)
-
-                # Compare versions
-                if comparison_result < 0:
-                    self.logger.error(
-                        f'Unsupported Unraid version: {self.unraid_version}. Requires version {self.unraid_version_min} or higher.'
-                    )
-                    sys.exit(1)
-                headers = {'Cookie': self.unraid_cookie}
-                subprotocols = ['ws+meta.nchan']
-                sub_channels = {
-                    'var': parsers.var,
-                    'session': parsers.session,
-                    'cpuload': parsers.cpuload,
-                    'apcups': parsers.apcups,
-                    'disks': parsers.disks,
-                    'parity': parsers.parity,
-                    'shares': parsers.shares,
-                    'update1': parsers.update1,
-                    'update3': parsers.update3,
-                    'temperature': parsers.temperature,
-                }
-                websocket_url = f'{self.unraid_ws}/sub/{",".join(sub_channels)}'
-
-                # Create a custom SSL context to ignore SSL certificate validation if needed
-                ssl_context = None
-                if not self.verify_ssl:
-                    ssl_context = ssl.create_default_context()
-                    ssl_context.check_hostname = False
-                    ssl_context.verify_mode = ssl.CERT_NONE
-
-                # Establish WebSocket connection using the custom SSL context
-                async with websockets.connect(
-                    websocket_url,
-                    subprotocols=subprotocols,
-                    extra_headers=headers,
-                    ssl=ssl_context,
-                ) as websocket:
-                    self.logger.info(f'Successfully connected to Unraid {self.unraid_version}')
-
-                    # Listen for messages
-                    while self.mqtt_connected:
-                        data = await asyncio.wait_for(websocket.recv(), timeout=120)
-
-                        # Store last message
-                        last_msg = data
-
-                        # Parse message id and content
-                        msg_data = data.replace('\00', ' ').split('\n\n', 1)[1]
-                        msg_ids = re.findall(r'([-\[\d\],]+,[-\[\d\],]*)|$', data)[0].split(',')
-                        sub_channel = next(
-                            sub
-                            for (sub, msg) in zip(sub_channels, msg_ids)
-                            if msg.startswith('[')
+            async def publish_event(event: Dict[str, Any]):
+                try:
+                    updates = await collector.parse(event) or []
+                    for upd in updates:
+                        self.mqtt.publish(
+                            payload=upd.payload,
+                            sensor_type=upd.sensor_type,
+                            state_value=upd.state,
+                            json_attributes=upd.attributes,
+                            retain=upd.retain,
+                            device_overrides=upd.device_overrides,
+                            unique_id_suffix=upd.unique_id_suffix,
+                            expire_after=upd.expire_after
                         )
-                        msg_parser = sub_channels.get(sub_channel, parsers.default)
+                except Exception as e:
+                    self.logger.error(f'Subscription "{collector.name}" publish failed: {e}')
 
-                        # Skip resource-intensive share parsing if within time limit
-                        if sub_channel == 'shares':
-                            current_time = time.time()
-                            time_passed = current_time - self.share_parser_lastrun
-                            if time_passed <= self.share_parser_interval:
-                                continue
-                            self.share_parser_lastrun = current_time
+            async def receiver_loop(session):
+                async for event in session.subscribe(gql(collector.subscription_query)):
+                    # keep only the latest event
+                    try:
+                        while True:
+                            event_queue.get_nowait()
+                            event_queue.task_done()
+                    except asyncio.QueueEmpty:
+                        pass
+                    await event_queue.put(event)
 
-                        # Create config if it doesn't exist for the subchannel
-                        if sub_channel not in self.mqtt_history:
-                            self.logger.info(f'Create config for {sub_channel}')
-                            self.mqtt_history[sub_channel] = (
-                                time.time() - self.scan_interval
-                            )
-                            self.loop.create_task(msg_parser(self, msg_data))
+                    if stop_local.is_set() or self._stop.is_set():
+                        break
 
-                        # Parse content periodically for the subchannel
-                        if self.scan_interval <= (
-                            time.time() - self.mqtt_history.get(sub_channel, time.time())
-                        ):
-                            self.logger.info(f'Parse data for {sub_channel}')
-                            self.mqtt_history[sub_channel] = time.time()
-                            self.loop.create_task(msg_parser(self, msg_data))
+            async def publisher_loop():
+                # Wait for the first event to arrive
+                try:
+                    while event_queue.empty() and not (stop_local.is_set() or self._stop.is_set()):
+                        await asyncio.sleep(0.05)
+                    if stop_local.is_set() or self._stop.is_set():
+                        return
+                    first_event = await event_queue.get()
+                except asyncio.CancelledError:
+                    return
+                # Immediate publish
+                await publish_event(first_event)
+                event_queue.task_done()
 
-            # Handle exceptions and connection issues
-            except (httpx.ConnectTimeout, httpx.ConnectError):
-                self.logger.error(
-                    'Failed to connect to Unraid due to a timeout or connection issue...'
-                )
-                self.mqtt_status(connected=False)
-                await asyncio.sleep(backoff)
+                # Throttled cadence thereafter
+                while not (stop_local.is_set() or self._stop.is_set()):
+                    try:
+                        await asyncio.wait_for(self._stop.wait(), timeout=base_interval)
+                        if self._stop.is_set():
+                            break
+                    except asyncio.TimeoutError:
+                        pass
+                    if stop_local.is_set():
+                        break
 
-                # Exponential backoff capped at 5 minutes
-                backoff = min(backoff * 2, 300)
-            except Exception:
-                self.logger.exception('Failed to connect to unraid due to an exception...')
-                self.logger.error('Last message received:')
-                self.logger.error(last_msg)
-                self.mqtt_status(connected=False)
+                    latest = None
+                    try:
+                        while True:
+                            latest = event_queue.get_nowait()
+                            event_queue.task_done()
+                    except asyncio.QueueEmpty:
+                        pass
+                    if latest is None:
+                        continue
 
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 300)
+                    await publish_event(latest)
+
+            try:
+                csrf = await self.gql.get_csrf_token()
+                if not csrf:
+                    raise RuntimeError('Failed to obtain CSRF token')
+
+                init_payload = {"x-csrf-token": csrf, "x-api-key": self.api_key}
+                ssl_ctx = None
+                if self.endpoint_ws.startswith('wss') and not self.verify_ssl:
+                    ssl_ctx = ssl_mod._create_unverified_context()
+
+                transport = WebsocketsTransport(url=self.endpoint_ws, init_payload=init_payload, ssl=ssl_ctx)
+                client = Client(transport=transport, fetch_schema_from_transport=False)
+
+                self.logger.info(f'Opening subscription for: {collector.name}')
+                async with client as session:
+                    recv_task = asyncio.create_task(receiver_loop(session))
+                    pub_task = asyncio.create_task(publisher_loop())
+
+                    await recv_task
+                    stop_local.set()
+                    try:
+                        await asyncio.wait_for(pub_task, timeout=2)
+                    except asyncio.TimeoutError:
+                        pub_task.cancel()
+
+                if not self._stop.is_set():
+                    self.logger.warning(f'Subscription ended for {collector.name}, reconnecting...')
+            except Exception as e:
+                if not self._stop.is_set():
+                    self.logger.error(f'Subscription "{collector.name}" failed: {e}')
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 60)
+            finally:
+                stop_local.set()
+
+    async def aclose(self):
+        self._stop.set()
+        try:
+            done, pending = await asyncio.wait(
+                self._query_tasks + self._subscription_tasks + self._legacy_tasks,
+                timeout=2,
+                return_when=asyncio.ALL_COMPLETED
+            )
+            for t in pending:
+                t.cancel()
+        except Exception:
+            for t in self._query_tasks + self._subscription_tasks + self._legacy_tasks:
+                t.cancel()
+        await self.gql.aclose()
+        await self.mqtt.aclose()
 
 
-if __name__ == '__main__':
-    signal.signal(signal.SIGTERM, handle_sigterm)
+async def main():
+    # Load config
+    config = load_file(os.path.join(DATA_DIR, 'config.yaml')) or {}
+    mqtt_cfg = config.get('mqtt') or {}
+    unraid_nodes = config.get('unraid') or []
+    if not unraid_nodes:
+        print('No unraid nodes defined in /data/config.yaml')
+        return
 
-    loggers = [
-        logging.getLogger(name) for name in logging.root.manager.loggerDict if name.startswith('gmqtt')
-    ]
-
-    for log in loggers:
-        logging.getLogger(log.name).disabled = True
-
-    config = load_file(os.path.join(DATA_DIR, 'config.yaml'))
-
+    # Windows recommended policy
     if os.name == 'nt':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     loop = asyncio.get_event_loop()
+    integrators: List[UnraidGraphQLIntegration] = []
+    for node_cfg in unraid_nodes:
+        try:
+            integrators.append(UnraidGraphQLIntegration(mqtt_cfg, node_cfg, loop))
+        except Exception as e:
+            print(f'Failed to initialize node: {e}')
 
-    for unraid_config in config.get('unraid'):
-        UnRAIDServer(config.get('mqtt'), unraid_config, loop)
+    # Start each integrator (fetch version, then start tasks)
+    await asyncio.gather(*(i.start() for i in integrators), return_exceptions=True)
 
-    loop.run_forever()
+    # Global stop event driven by signals
+    stop_event = asyncio.Event()
+
+    def trigger_stop(*_):
+        stop_event.set()
+
+    # Register signal handlers (SIGINT for Ctrl+C; SIGTERM for container stop)
+    try:
+        signal.signal(signal.SIGINT, trigger_stop)
+    except Exception:
+        pass
+    try:
+        signal.signal(signal.SIGTERM, trigger_stop)
+    except Exception:
+        pass
+
+    # Wait until a stop signal arrives
+    await stop_event.wait()
+
+    # Gracefully close integrators
+    await asyncio.gather(*(i.aclose() for i in integrators), return_exceptions=True)
+
+
+if __name__ == '__main__':
+    asyncio.run(main())

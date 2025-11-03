@@ -3,108 +3,23 @@ import re
 import json
 import yaml
 import hashlib
-import configparser
+import logging
+import functools
 from lxml import etree
-from functools import wraps
+from typing import Any, Callable, Dict
 
 
-class Preferences:
-    def __init__(self, string_ini):
-        self.config = configparser.ConfigParser()
-        self.config.read_string(string_ini)
-        self.d = self.to_dict(self.config._sections)
-
-    def as_dict(self):
-        return self.d
-
-    def to_dict(self, config):
-        """
-        Nested OrderedDict to normal dict.
-        Also, remove the annoying quotes (apostrophes) from around string values.
-        """
-        d = json.loads(json.dumps(config))
-        d = remove_quotes(d)
-        d = {k: v for k, v in d.items() if v}
-
-        return d
-
-
-def calculate_hash(data):
-    return hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()
-
-
-def handle_sigterm(*args):
-    raise KeyboardInterrupt()
-
-
-def normalize_str(string):
-    string = string.lower()
-    string = string.replace(' ', '_')
-    string = ''.join([c for c in string if c.isalpha() or c.isdigit() or c == '_']).rstrip()
-
-    return string
-
-
-def remove_quotes(config):
-    for key, value in list(config.items()):
-
-        # Remove quotes from section
-        key_strip = key.strip('"')
-        config[key_strip] = config.pop(key)
-
-        if isinstance(value, str):
-            s = config[key_strip]
-
-            # Remove quotes from value
-            s = s.strip('"')
-
-            # Convert strings to numbers
-            try:
-                s = int(s)
-            except ValueError:
-                pass
-
-            config[key_strip] = s
-        if isinstance(value, dict):
-            config[key_strip] = remove_quotes(value)
-
-    return config
-
-
-def compare_versions(version1, version2):
-    def is_valid_version(version):
-        # Check if the version contains at least one digit
-        return bool(re.search(r'\d', version))
-
-    def normalize_version(version):
-        # Use a regex to extract all numeric parts separated by dots
-        return [int(part) for part in re.findall(r'\d+', version)]
-
-    # Handle invalid or non-numeric versions
-    if not version1 or not is_valid_version(version1):
-        return None
-    if not version2 or not is_valid_version(version2):
-        return None
-
-    # Normalize the versions by extracting numeric parts and converting to a list of integers
-    parts1 = normalize_version(version1)
-    parts2 = normalize_version(version2)
-
-    # Compare each part of the version (major, minor, patch, etc.)
-    for v1, v2 in zip(parts1, parts2):
-        if v1 < v2:
-            return -1
-        elif v1 > v2:
-            return 1
-
-    # Handle cases where the versions have different lengths
-    if len(parts1) < len(parts2):
-        return -1
-    elif len(parts1) > len(parts2):
-        return 1
-
-    # Versions are equal
-    return 0
+def load_file(path_to_file: str):
+    if not os.path.isfile(path_to_file):
+        return {}
+    _, extension = os.path.splitext(path_to_file)
+    with open(path_to_file, 'r', encoding='utf-8') as f:
+        try:
+            if extension.lower() == '.json':
+                return json.load(f)
+            return yaml.safe_load(f)
+        except Exception:
+            return {}
 
 
 def parse_smart_data(html_data, logger):
@@ -173,47 +88,80 @@ def parse_smart_data(html_data, logger):
         return {}
 
 
-def load_file(path_to_file):
-    if not os.path.isfile(path_to_file):
-        return {}
-
-    filename, extension = os.path.splitext(path_to_file)
-    with open(path_to_file) as f:
-        try:
-            if 'json' in extension:
-                data = json.load(f)
-            else:
-                data = yaml.safe_load(f)
-        except Exception:
-            return {}
-
-    return data
+def normalize_str(string: str) -> str:
+    s = string.lower().replace(' ', '_')
+    s = ''.join([c for c in s if c.isalpha() or c.isdigit() or c == '_']).rstrip()
+    return s
 
 
-def log_errors(parser_name):
+def normalize_keys_lower(obj: Any) -> Any:
     """
-    A decorator to catch and log errors along with the raw `msg_data`.
-
-    :param parser_name: Name of the parser being wrapped (used for logging purposes).
+    Recursively lower-case dict keys.
+    Lists are processed element-wise; non-dict types are returned as-is.
     """
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(self, msg_data, *args, **kwargs):
+    if isinstance(obj, dict):
+        return {str(k).lower(): normalize_keys_lower(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [normalize_keys_lower(v) for v in obj]
+    return obj
+
+
+def to_snake_case(name: str) -> str:
+    """
+    Convert camelCase/PascalCase/mixed to snake_case lower.
+    Examples: 'nameOrig' -> 'name_orig', 'splitLevel' -> 'split_level', 'URLValue' -> 'url_value'
+    """
+    # Insert underscore before capitals, collapse multiple underscores, lower-case
+    s1 = re.sub(r'([A-Z]+)', r'_\1', name).strip('_')
+    s2 = re.sub(r'__+', r'_', s1)
+    return s2.lower()
+
+
+def normalize_keys_snake(obj: Any) -> Any:
+    """
+    Recursively convert dict keys to snake_case lower.
+    """
+    if isinstance(obj, dict):
+        return {to_snake_case(str(k)): normalize_keys_snake(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [normalize_keys_snake(v) for v in obj]
+    return obj
+
+
+def calculate_hash(data: Dict[str, Any]) -> str:
+    return hashlib.md5(json.dumps(data, sort_keys=True).encode('utf-8')).hexdigest()
+
+
+def setup_logger(name: str) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s [%(name)s] [%(levelname)-8s] %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    return logger
+
+
+def log_errors(context: str) -> Callable:
+    """
+    Decorator for async functions to catch and log errors with context.
+    """
+    def decorator(func: Callable):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            logger = None
+            if args:
+                self_obj = args[0]
+                logger = getattr(self_obj, 'logger', None)
             try:
-                # Call the original parser function
-                return await func(self, msg_data, *args, **kwargs)
+                return await func(*args, **kwargs)
             except Exception as e:
-                # Log the structured error message
-                self.logger.error(
-                    f'Error in parser "{parser_name}". Exception occurred: {type(e).__name__} - {e}'
-                )
-                self.logger.error(f'Raw msg_data causing the error:\n---\n{msg_data}\n---')
-
-                # Log full tracebacks in their own entry (to avoid inline interleaving)
-                self.logger.exception(f'Parser "{parser_name}" failed with error')
-
-                # Prevent "Task exception was never retrieved" messages by fully handling the exception
-                # Suppress further propagation to the asyncio event loop
+                if logger:
+                    logger.error(f'Error in "{context}": {type(e).__name__} - {e}')
+                    logger.exception(f'"{context}" failed with error')
+                else:
+                    print(f'Error in "{context}": {type(e).__name__} - {e}')
                 return None
         return wrapper
     return decorator

@@ -3,38 +3,66 @@
 </div>
 
 
+> ## ⚠️ Breaking changes
+> UnRAID 7.2.0 introduced a GraphQL API. While this is fantastic news, it also comes with breaking changes. I’ve tried to make this integration as backwards-compatible as possible.
+>
+> - If you are still on UnRAID 7.0–7.1, use the latest `1.x.x` Docker image.
+> - Users of UnRAID 7.2.0+ can use any `2.x.x` image or simply `:latest` (which always points to the newest release).
+> - 2.x.x releases now require an Unraid GraphQL API Key (Viewer role). Create one in Unraid (Settings → Management Access → API Keys) and set it as `api_key` in your `config.yaml`. See the instructions in the README: [Important: Requirements and version support](#important-requirements-and-version-support).
+> - For 2.x.x, you will need to update the Lovelace button-card templates. Copy the updated files from `/lovelace/templates/` in this repo into your Home Assistant config (e.g., `/config/lovelace/templates/button_card/`), then reload resources or restart Home Assistant.
+>
+> Recommended: delete the MQTT device this integration created and reboot the container once after updating to clear out old sensors and avoid duplicate/renamed entities.  
+> In Home Assistant, go to Settings → Devices & Services → MQTT, find your server’s device, and delete it using the three-dots menu (or the “MQTT info” link on the device page), then restart the container.
+
+
 # Unraid to Home Assistant
-This Docker container parses and forwards all WebSocket messages from your Unraid server to Home Assistant using the MQTT protocol. This enables you to create dashboards that provide a superior overview compared to Unraid's native capabilities.
+
+This Docker container integrates with your Unraid server by leveraging both the GraphQL API and legacy WebSocket/HTTP endpoints to gather relevant data. It then forwards this information to Home Assistant via MQTT so you can build dashboards that provide a better overview than Unraid’s native UI.
+
 
 # Features
-1. Historical data is crucial! I aimed to monitor CPU, RAM, and other attributes over time. Maybe most importantly know how often and when disks spin up in order to debug the cause easier.
 
-2. This integration enables Unraid automations via Home Assistant. You can receive notifications for disk space running low, fan failures, and more.
-
-3. The custom view I developed greatly enhances locating disks within the array. A disk's color changes from grey (spin-down) to yellow to red if it overheats, and warnings are displayed for disks with issues. It also has a notification when disk scrubbing is running.
-
-4. Instantly identify which shares are on which disks and how full the disk is.
-
-5. The "network-share" view in Home Assistant is much more intuitive than Unraid's "shares" tab, in my opinion.
-
-6. Get SMART alerts for critical attribute changes — even for SAS drives, which Unraid itself doesn’t natively support!
+1. Historical data is crucial! Monitor CPU, RAM, network, disk temperatures, and more over time — including how often and when disks spin up.
+2. Enable Unraid automations via Home Assistant. Get alerts for low disk space, fan failures, and more.
+3. A custom view that makes it easier to locate disks in the array. Disks change color from grey (spun down) to yellow/red if overheating, with warnings for problem disks. Includes a parity/scrub running indicator.
+4. Instantly see which shares are on which disks and how full each disk is.
+5. A “network-share” view in Home Assistant that’s more intuitive than Unraid’s Shares tab.
+6. SMART alerts for critical attribute changes — including SAS drives, which Unraid doesn’t natively notify about.
 
 
 <div align="center">
-  <img src="extras/screenshot.png" width="250" alt="screenshot">
+  <a href="extras/mqtt_entities.png">
+    <img src="extras/mqtt_entities_cropped.png" width="250" alt="mqtt entities (preview)">
+  </a>
+  <a href="extras/screenshot.png">
+    <img src="extras/screenshot.png" width="250" alt="screenshot (preview)">
+  </a>
 </div>
 
 
-## Prerequisites
-This integration only works with Unraid 7 or later.
-Ensure that Home Assistant and MQTT are correctly configured before proceeding.
+## Important: Requirements and version support
 
+- Unraid 7 or later is required.
+- API Key is required for GraphQL access:
+  - In Unraid, go to Settings → Management Access → API Keys → Create API Key → Create New.
+  - Give it a name (e.g., “Home Assistant”) and select the “Viewer” role, then create.
+- Username and password are still required because not all data sources are available via GraphQL yet (e.g., some legacy channels, SMART enrichment, share details, GPU plugin stats).
+- Docker image tags:
+  - Unraid 7.0–7.1: use the latest `1.x.x` image tag.
+  - Unraid 7.2.0 or later: use any `2.x.x` image tag or simply `:latest`.
+  - The `:latest` tag will always point to the newest release.
+
+
+## Prerequisites
+
+- Home Assistant and an MQTT broker set up and working.
+- Unraid 7+ with a Viewer-role API Key created (see steps above).
+- Unraid username/password for legacy endpoints.
 
 ## Getting started
 
-I haven't created a Unraid template as I personally utilize docker-compose. However, setting this up shouldn't pose significant challenges.
+Create a `data` folder and place a `config.yaml` inside. Example with two servers (“Kaya” and “Hisa”); adjust MQTT accordingly:
 
-Generate a config.yaml and store it in a directory named `data`. For instance, I'll demonstrate by configuring two servers named 'Kaya' and 'Hisa'. Ensure to adjust the MQTT settings accordingly:
 ```
 unraid:
   - name: Kaya
@@ -43,6 +71,7 @@ unraid:
     ssl: false
     username: root
     password: PASSWORD
+    api_key: VIEWER_ROLE_API_KEY
     scan_interval: 30
 
   - name: Hisa
@@ -52,8 +81,9 @@ unraid:
     ssl_verify: false
     username: root
     password: PASSWORD
+    api_key: VIEWER_ROLE_API_KEY
     scan_interval: 30
-  
+
 mqtt:
   host: 192.168.1.100
   port: 1883
@@ -63,8 +93,9 @@ mqtt:
 
 Now we can run our container either using `docker run` or `docker-compose`.
 
-Docker run:
-```
+### Docker run
+
+```bash
 docker run -d \
   --name hass-unraid \
   --network bridge \
@@ -74,10 +105,9 @@ docker run -d \
   ghcr.io/idmedia/hass-unraid:latest
 ```
 
-Docker-compose:
-```
-version: '3'
+### Docker-compose
 
+```yaml
 services:
   hass-unraid:
     container_name: hass-unraid
@@ -90,42 +120,63 @@ services:
     image: ghcr.io/idmedia/hass-unraid:latest
 ```
 
-The container should now connect to your Unraid server(s) and automatically create an entry in Home Assistant. To verify navigate to Settings->Devices & Services->MQTT. If no device is created make sure to check the contains logs using `docker logs hass-unraid`.
+### Notes
 
+- If you’re on Unraid 7.0–7.1, replace the image tag with your chosen `1.x.x` release (e.g., `ghcr.io/idmedia/hass-unraid:1.x.x`).
+- On Unraid 7.2.0+, you can use `:latest` or pin a specific `2.x.x` tag.
+- On first run, a device should appear in Home Assistant under Settings → Devices & Services → MQTT.  
+  If nothing shows up, check the container logs: `docker logs hass-unraid`.
+
+## Updating
+
+It’s recommended to delete the MQTT device this integration creates before updating, as some entities may have been renamed or removed between versions. Then restart the container once.
+
+Steps:
+1. In Home Assistant, go to Settings → Devices & Services → MQTT.
+2. Find your Unraid server’s MQTT device in the list.
+3. Delete it using either:
+   - The three-dots menu on the overview page, or
+   - The “MQTT info” text link on the device page, then use the delete option there.
+4. Restart the `hass-unraid` container.
 
 ## Lovelace
 
-Please check out the `lovelace` folder. That's where I've placed two button-card templates and the main setup for showing the server named `Kaya` just like you see in the screenshot.
+See the `lovelace` folder for two button-card templates and an example setup for “Kaya” like in the screenshot.
 
-This lovelace example is a bit complex and requires these modules in Home Assistant to work properly:
- * [button-card](https://github.com/custom-cards/button-card)
- * [vertical-stack-in-card](https://github.com/ofekashery/vertical-stack-in-card)
- * [auto-entities](https://github.com/thomasloven/lovelace-auto-entities)
- * [card-mod](https://github.com/thomasloven/lovelace-card-mod)
+This example uses:
+- [button-card](https://github.com/custom-cards/button-card)
+- [vertical-stack-in-card](https://github.com/ofekashery/vertical-stack-in-card)
+- [auto-entities](https://github.com/thomasloven/lovelace-auto-entities)
+- [card-mod](https://github.com/thomasloven/lovelace-card-mod)
 
+Copy the button-card templates from `/lovelace/templates/` into `/config/lovelace/templates/button_card/`:
 
-Copy the button_card templates from `/lovelace/templates/` into `/config/lovelace/templates/button_card/`:
 ```
 network_share.yaml
 simple_bar.yaml
 unraid_disk.yaml
 ```
 
-Ensure button-card locates the templates by adding the following line to the top of your ui-lovelace.yaml file:
-```
+Ensure button-card finds the templates by adding this to the top of your `ui-lovelace.yaml`:
+
+```yaml
 button_card_templates: !include_dir_merge_named lovelace/templates/button_card
 ```
 
 ## Packages
-If you're looking to create fan speed sensors or set up SMART attribute notifications, check out the `packages` folder. The `UnRaid Smart Data` package caches SMART attributes for all disks, while the `Notify on SMART Attribute Change` automation sends a notification if any defined attribute changes state. This was developed because UnRAID doesn’t support SMART notifications for SAS drives, and I discovered too late that several of my disks had entries in the `Elements in grown defect list`.
+
+If you want fan speed sensors or SMART attribute notifications, see the `packages` folder.  
+“UnRaid Smart Data” caches SMART attributes for all disks, and “Notify on SMART Attribute Change” sends a notification if any defined attribute changes state — helpful for SAS drives where Unraid doesn’t notify on SMART attributes.
+
 
 <div align="center">
   <img src="extras/notifications.jpg" width="250" alt="notifications">
 </div>
 
 
+## Contribute
 
-### Feel free to contribute, report issues, or suggest improvements! If you find this repository useful, don't forget to star it :)
+Issues, PRs, and suggestions are welcome. If you find this useful, please consider starring the repo!
 
 <a href="https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=JPGHGTWP33A5L">
   <img src="https://raw.githubusercontent.com/stefan-niedermann/paypal-donate-button/master/paypal-donate-button.png" alt="Donate with PayPal" />

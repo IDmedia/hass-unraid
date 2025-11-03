@@ -66,8 +66,17 @@ button_unraid_disk:
     custom_fields:
       icon:
         - justify-self: start
-        - padding-left: 5px
         - font-weight: bold
+        - padding-left: >
+            [[[
+              const s = entity?.attributes?.status;
+              return (s === 'DISK_OK') ? '0' : '5px';
+            ]]]
+        - display: >
+            [[[
+              const s = entity?.attributes?.status;
+              return (s === 'DISK_OK') ? 'none' : 'block';
+            ]]]
       temp:
         - grid-area: temp
         - justify-self: end
@@ -99,13 +108,22 @@ button_unraid_disk:
   custom_fields:
     icon: >
       [[[
-          if (entity.attributes.color) {
-            if (entity.attributes.color.startsWith('yellow')) { return '⚠'; }
-            else if (entity.attributes.color.startsWith('red')) { return '✖'; }
-          }
-          else {
-            return '?';
-          }
+        const statusIcons = {
+          DISK_NP: '?',                // Not Present
+          DISK_OK: '',                 // No icon for OK
+          DISK_NP_MISSING: '⚠',       // Not Present, Missing
+          DISK_INVALID: '✖',          // Invalid
+          DISK_WRONG: '✖',            // Wrong Disk
+          DISK_DSBL: '⚠',             // Disabled Disk
+          DISK_NP_DSBL: '⚠',          // Not Present, Disabled
+          DISK_DSBL_NEW: '🛠',         // Disabled but New Disk
+          DISK_NEW: '🆕'               // New Disk
+        };
+
+        // Use optional chaining for safe access, and default fallback to '?' when needed
+        return entity?.attributes?.status
+          ? (statusIcons[entity.attributes.status] !== undefined ? statusIcons[entity.attributes.status] : '?')
+          : '?';
       ]]]
     temp: >
       [[[
@@ -125,22 +143,33 @@ button_unraid_disk:
       ]]]
     shares: >
       [[[
-        let regex = entity.entity_id.match(/disk_(\d+)/g) || [""];
-        let diskId = regex[0].replace("_", "")
+        // Extract disk id as "diskN"
+        const m = entity.entity_id.match(/disk_(\d+)/);
+        if (!m) return '&nbsp;';
+        const diskId = `disk${m[1]}`;
 
-        if (!diskId)
-          return '&nbsp;';
-        
-        let serverName = entity.entity_id.substring(entity.entity_id.indexOf(".") + 1, entity.entity_id.indexOf("_"));
-        let diskShares = Object.entries(states)
-                            .filter(([k]) => k.includes(`${serverName}_share`))
-                            .filter(([k, v]) => typeof v.attributes.include !== 'undefined')
-                            .filter(([k, v]) => v.attributes.include.split(',').indexOf(`${diskId}`) !== -1)
-                            .map(([k, v]) => { return v.attributes.nameorig });
+        const serverName = entity.entity_id.substring(
+          entity.entity_id.indexOf(".") + 1,
+          entity.entity_id.indexOf("_")
+        );
 
-        let shares = (diskShares.length > 0) ? diskShares.join(', ') : '&nbsp;';
-        
-        return shares;
+        const normalize = v => String(v).trim().toLowerCase();
+
+        const diskShares = Object.entries(states)
+          .filter(([k]) => k.includes(`${serverName}_share`))
+          .filter(([k, v]) => v?.attributes && v.attributes.include !== undefined)
+          .filter(([k, v]) => {
+            const inc = v.attributes.include;
+            // Normalize include to an array of strings
+            const list = Array.isArray(inc)
+              ? inc
+              : (typeof inc === 'string' ? inc.split(',') : []);
+            const normList = list.map(normalize);
+            return normList.includes(normalize(diskId));
+          })
+          .map(([k, v]) => v.attributes.nameorig);
+
+        return (diskShares.length > 0) ? diskShares.join(', ') : '&nbsp;';
       ]]]
     used: >
       [[[
