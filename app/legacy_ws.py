@@ -1,5 +1,5 @@
-import asyncio
 import httpx
+import asyncio
 import ssl as ssl_mod
 from http.cookies import SimpleCookie
 from typing import Callable, Optional, Tuple, List
@@ -15,58 +15,54 @@ class LegacyAuth:
         self._cookie: Optional[str] = None
         self._lock = asyncio.Lock()
 
-    async def get_cookie(self) -> str:
+    def invalidate(self):
+        """Invalidate the cached cookie so the next call re-logins."""
+        self._cookie = None
+
+    async def get_cookie(self, force: bool = False) -> str:
         async with self._lock:
-            if self._cookie:
+            if self._cookie and not force:
                 return self._cookie
 
-            # Follow redirects so 302 -> /Dashboard is handled, and cookies are collected in the jar
-            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30, follow_redirects=True) as http:
-                try:
-                    r = await http.post(f'{self.base_http_url}/login', data={
-                        'username': self.username,
-                        'password': self.password
-                    })
-                    # No raise_for_status here; 302 is expected
+            async with httpx.AsyncClient(
+                verify=self.verify_ssl,
+                timeout=30,
+                follow_redirects=True
+            ) as http:
+                r = await http.post(f'{self.base_http_url}/login', data={
+                    'username': self.username,
+                    'password': self.password
+                })
 
-                    # 1) Prefer cookie jar from the client (aggregates cookies across redirects)
-                    jar_items = list(http.cookies.items())
-                    if jar_items:
-                        # Build a 'Cookie' header string: "name=value; name2=value2"
-                        cookie_header = '; '.join([f'{k}={v}' for k, v in jar_items])
-                        self._cookie = cookie_header
-                        self.logger.info('Legacy WS: obtained Unraid cookie from session jar')
-                        return self._cookie
+                # Prefer cookie jar
+                jar_items = list(http.cookies.items())
+                if jar_items:
+                    self._cookie = '; '.join([f'{k}={v}' for k, v in jar_items])
+                    self.logger.info('Legacy WS: obtained Unraid cookie (jar)')
+                    return self._cookie
 
-                    # 2) Fallback: parse Set-Cookie headers from the response
-                    cookies_list = []
-                    # httpx's headers object supports get_list in recent versions
-                    if hasattr(r.headers, 'get_list'):
-                        cookies_list = r.headers.get_list('set-cookie')
-                    else:
-                        sc = r.headers.get('set-cookie')
-                        if sc:
-                            cookies_list = [sc]
+                # Fallback parse Set-Cookie headers
+                cookies_list = []
+                if hasattr(r.headers, 'get_list'):
+                    cookies_list = r.headers.get_list('set-cookie')
+                else:
+                    sc = r.headers.get('set-cookie')
+                    if sc:
+                        cookies_list = [sc]
+                if cookies_list:
+                    simple = SimpleCookie()
+                    for sc in cookies_list:
+                        simple.load(sc)
+                    pairs = [f'{m.key}={m.value}' for m in simple.values()]
+                    self._cookie = '; '.join(pairs)
+                    self.logger.info('Legacy WS: obtained Unraid cookie (Set-Cookie)')
+                    return self._cookie
 
-                    if cookies_list:
-                        simple = SimpleCookie()
-                        for sc in cookies_list:
-                            simple.load(sc)
-                        # Only send "name=value" pairs in the Cookie header
-                        pairs = [f'{m.key}={m.value}' for m in simple.values()]
-                        cookie_header = '; '.join(pairs)
-                        self._cookie = cookie_header
-                        self.logger.info('Legacy WS: obtained Unraid cookie from Set-Cookie headers')
-                        return self._cookie
-
-                    raise RuntimeError('Login succeeded but no cookies were set')
-                except Exception as e:
-                    self.logger.error(f'Legacy WS: login failed: {e}')
-                    raise
+                raise RuntimeError('Login succeeded but no cookies were set')
 
 
 class LegacyWSRunner:
-    def __init__(self, base_ws_url: str, http_base_url: str, verify_ssl: bool, auth, logger):
+    def __init__(self, base_ws_url: str, http_base_url: str, verify_ssl: bool, auth: LegacyAuth, logger):
         self.base_ws_url = base_ws_url.rstrip('/')
         self.http_base_url = http_base_url.rstrip('/')
         self.verify_ssl = verify_ssl
@@ -130,6 +126,7 @@ class LegacyWSRunner:
                         msg_data = raw.replace('\00', ' ').split('\n\n', 1)[1]
                     except Exception:
                         msg_data = raw
+                    # Keep only the latest event
                     try:
                         while True:
                             event_queue.get_nowait()
@@ -139,6 +136,7 @@ class LegacyWSRunner:
                     await event_queue.put(msg_data)
 
             async def publisher_loop():
+                # Wait for the first event to arrive
                 try:
                     while event_queue.empty() and not (local_stop.is_set() or stop_event.is_set()):
                         await asyncio.sleep(0.05)
@@ -147,9 +145,11 @@ class LegacyWSRunner:
                     first = await event_queue.get()
                 except asyncio.CancelledError:
                     return
+                # Immediate-first publish
                 await publish_updates(first)
                 event_queue.task_done()
 
+                # Throttled cadence thereafter
                 while not (local_stop.is_set() or stop_event.is_set()):
                     try:
                         await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
@@ -157,6 +157,7 @@ class LegacyWSRunner:
                             break
                     except asyncio.TimeoutError:
                         pass
+
                     latest = None
                     try:
                         while True:
@@ -168,26 +169,76 @@ class LegacyWSRunner:
                         continue
                     await publish_updates(latest)
 
-            # NEW: keepalive task for parity channel
             async def keepalive_loop():
                 """
-                Tickles the GUI backend by fetching /Main periodically so parity updates continue.
+                Generic tickle: periodically GET both /Main and /Dashboard to keep Nchan producers active,
+                regardless of channel name.
                 """
-                if channel_name != 'parity':
-                    return
-                async with httpx.AsyncClient(verify=self.verify_ssl, timeout=10, follow_redirects=True) as http:
+                period = max(15, int(interval_seconds))
+
+                async with httpx.AsyncClient(
+                    verify=self.verify_ssl,
+                    timeout=10,
+                    follow_redirects=True
+                ) as http:
                     while not (local_stop.is_set() or stop_event.is_set()):
                         try:
                             cookie = await self.auth.get_cookie()
                             headers = {'Cookie': cookie}
-                            url = f'{self.http_base_url}/Main'
-                            await http.get(url, headers=headers)
+
+                            # /Main
+                            r = await http.get(f'{self.http_base_url}/Main', headers=headers)
+                            if r.status_code in (401, 403):
+                                self.logger.info(f'Legacy WS "{channel_name}" keepalive: auth expired on /Main, refreshing cookie')
+                                headers['Cookie'] = await self.auth.get_cookie(force=True)
+                                await http.get(f'{self.http_base_url}/Main', headers=headers)
+
+                            # /Dashboard
+                            r = await http.get(f'{self.http_base_url}/Dashboard', headers=headers)
+                            if r.status_code in (401, 403):
+                                self.logger.info(f'Legacy WS "{channel_name}" keepalive: auth expired on /Dashboard, refreshing cookie')
+                                headers['Cookie'] = await self.auth.get_cookie(force=True)
+                                await http.get(f'{self.http_base_url}/Dashboard', headers=headers)
+
                         except Exception:
-                            # Suppress errors; this is best-effort
+                            # Suppress errors; best-effort tickle
                             pass
-                        await asyncio.sleep(20)  # adjust period if needed
+                        await asyncio.sleep(period)
+
+            async def prime_stream():
+                """
+                Prime both /Main and /Dashboard once before opening the WebSocket.
+                Refresh cookie on 401/403 once, then retry.
+                """
+                try:
+                    async with httpx.AsyncClient(
+                        verify=self.verify_ssl,
+                        timeout=10,
+                        follow_redirects=True
+                    ) as http:
+                        headers = {'Cookie': await self.auth.get_cookie()}
+
+                        r = await http.get(f'{self.http_base_url}/Main', headers=headers)
+                        if r.status_code in (401, 403):
+                            self.logger.info(f'Legacy WS "{channel_name}" prime: auth expired on /Main, refreshing cookie')
+                            headers['Cookie'] = await self.auth.get_cookie(force=True)
+                            await http.get(f'{self.http_base_url}/Main', headers=headers)
+
+                        r = await http.get(f'{self.http_base_url}/Dashboard', headers=headers)
+                        if r.status_code in (401, 403):
+                            self.logger.info(f'Legacy WS "{channel_name}" prime: auth expired on /Dashboard, refreshing cookie')
+                            headers['Cookie'] = await self.auth.get_cookie(force=True)
+                            await http.get(f'{self.http_base_url}/Dashboard', headers=headers)
+
+                    self.logger.debug(f'Legacy WS "{channel_name}" primed: /Main and /Dashboard')
+                except Exception as e:
+                    self.logger.debug(f'Legacy WS "{channel_name}" prime failed: {e}')
 
             try:
+                # Prime before open (handles cookie refresh if needed)
+                await prime_stream()
+
+                # Prepare headers and SSL context
                 cookie = await self.auth.get_cookie()
                 headers = {'Cookie': cookie}
                 subprotocols = ['ws+meta.nchan']
@@ -198,12 +249,12 @@ class LegacyWSRunner:
 
                 url = f'{self.base_ws_url}/sub/{channel_name}'
                 self.logger.info(f'Legacy WS opening channel: {channel_name}')
-
                 connect_cm = await self._connect_ws_compat(url, subprotocols, headers, ssl_ctx)
+
                 async with connect_cm as ws:
                     recv_task = asyncio.create_task(receiver_loop(ws))
                     pub_task = asyncio.create_task(publisher_loop())
-                    ka_task = asyncio.create_task(keepalive_loop())  # NEW
+                    ka_task = asyncio.create_task(keepalive_loop())
 
                     await recv_task
                     local_stop.set()
@@ -217,9 +268,12 @@ class LegacyWSRunner:
                         ka_task.cancel()
 
                 if not stop_event.is_set():
-                    self.logger.warning(f'Legacy WS channel ended: {channel_name}, reconnecting...')
+                    # Invalidate cookie before backoff/reconnect, to avoid stale sessions
+                    self.auth.invalidate()
+                    self.logger.warning(f'Legacy WS channel ended: {channel_name}, refreshing auth and reconnecting...')
             except Exception as e:
                 if not stop_event.is_set():
+                    self.auth.invalidate()
                     self.logger.error(f'Legacy WS channel "{channel_name}" failed: {e}')
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 60)
