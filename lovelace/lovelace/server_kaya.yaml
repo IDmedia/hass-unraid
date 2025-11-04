@@ -83,11 +83,15 @@ cards:
             }
       content: |
         <ha-alert alert-type="warning">
-          <strong>Parity-Check in progress</strong><br />
+          <strong>Parity-Check {% if 'paused' in state_attr("sensor.kaya_parity_check", "elapsed_time") | lower %}paused{% else %}in progress{% endif %}</strong><br />
           Current position: {{ state_attr("sensor.kaya_parity_check", "current_position") | int(0) | filesizeformat() }}
                             ({{ states("sensor.kaya_parity_check") | float(0)}} %) @ 
                             {{ state_attr("sensor.kaya_parity_check", "estimated_speed") | int(0) | filesizeformat() }}/sec<br />
+          {%- if 'paused' in state_attr("sensor.kaya_parity_check", "elapsed_time") | lower %}
+          Elapsed time: {{ state_attr("sensor.kaya_parity_check", "elapsed_time") }}
+          {%- else %}
           Estimated finish: {{ state_attr("sensor.kaya_parity_check", "estimated_finish") }}
+          {%- endif %}
         </ha-alert>
     filter:
       template: |
