@@ -58,10 +58,19 @@ button_network_share:
         var free = parseInt(entity.attributes.free);
         var used = parseInt(entity.attributes.used);
 
-        var spaceFree = Math.max(0, free * 1000);
+        var spaceUsed = Math.max(0, used * 1000);
         var spaceTotal = (free+used) * 1000;
 
-        return `${formatBytes(spaceFree, 0)} free of ${formatBytes(spaceTotal, 0)}`;
+        // Determine decimal places based on size
+        var sizeIndex = Math.floor(Math.log(spaceUsed)/Math.log(1000));
+        var decimals = 0;
+        if (sizeIndex === 3) { // GB
+          decimals = 1;
+        } else if (sizeIndex >= 4) { // TB or above
+          decimals = 2;
+        }
+
+        return `${formatBytes(spaceUsed, decimals)} used of ${formatBytes(spaceTotal, 0)}`;
       ]]]
     bar: >
       [[[
