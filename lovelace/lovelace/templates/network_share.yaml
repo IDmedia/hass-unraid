@@ -1,5 +1,8 @@
 button_network_share:
   variables:
+    show_used: false            # true = show "used of total", false = show "free of total"
+    decimals_leq_gb: 0          # decimals to use for Bytes/KB/MB/GB
+    decimals_geq_tb: 0          # decimals to use for TB and above
     warning_from_state: 80
     critical_from_state: 90
     bar_color_normal: '#69B34C'
@@ -12,7 +15,7 @@ button_network_share:
   name: >
     [[[
       if (isNaN(entity.state)) {
-          return 'Unavailable';
+        return 'Unavailable';
       }
       return `${entity.attributes.nameorig}`;
     ]]]
@@ -52,36 +55,50 @@ button_network_share:
         if (isNaN(entity.state)) {
           return 'Unknown';
         }
-      
-        function formatBytes(a,b=2){if(!+a)return"0 Bytes";const c=0>b?0:b,d=Math.floor(Math.log(a)/Math.log(1000));return`${parseFloat((a/Math.pow(1000,d)).toFixed(c))} ${["Bytes", "KB","MB","GB","TB","PB","EB","ZB","YB"][d]}`}
+
+        function formatBytes(a,b=2) {
+          if (!+a) return "0 Bytes";
+          const c = b < 0 ? 0 : b;
+          const d = Math.floor(Math.log(a)/Math.log(1000));
+          return `${parseFloat((a/Math.pow(1000,d)).toFixed(c))} ${["Bytes","KB","MB","GB","TB","PB","EB","ZB","YB"][d]}`;
+        }
+
+        function decimalsFor(value) {
+          if (!+value) return 0;
+          const idx = Math.floor(Math.log(value) / Math.log(1000));
+          return (idx >= 4) ? variables.decimals_geq_tb : variables.decimals_leq_gb;
+        }
 
         var free = parseInt(entity.attributes.free);
         var used = parseInt(entity.attributes.used);
 
         var spaceFree = Math.max(0, free * 1000);
-        var spaceTotal = (free+used) * 1000;
+        var spaceUsed = Math.max(0, used * 1000);
+        var spaceTotal = (free + used) * 1000;
 
-        return `${formatBytes(spaceFree, 0)} free of ${formatBytes(spaceTotal, 0)}`;
+        if (variables.show_used === true) {
+          var dec = decimalsFor(spaceUsed);
+          return `${formatBytes(spaceUsed, dec)} used of ${formatBytes(spaceTotal, 0)}`;
+        } else {
+          var dec = decimalsFor(spaceFree);
+          return `${formatBytes(spaceFree, dec)} free of ${formatBytes(spaceTotal, 0)}`;
+        }
       ]]]
     bar: >
       [[[
         var pctUsed = 100;
-        
         if (!isNaN(entity.state)) {
           var free = parseInt(entity.attributes.free);
           var used = parseInt(entity.attributes.used);
-
           var spaceFree = Math.max(0, free * 1000);
-          var spaceTotal = (free+used) * 1000;
-        
-          pctUsed = Math.ceil(100-((spaceFree / spaceTotal) * 100));
+          var spaceTotal = (free + used) * 1000;
+          pctUsed = Math.ceil(100 - ((spaceFree / spaceTotal) * 100));
         }
 
         let barColor = variables.bar_color_normal;
-        
-        barColor = (pctUsed > variables.warning_from_state ) ? variables.bar_color_warning : barColor;
-        barColor = (pctUsed > variables.critical_from_state ) ? variables.bar_color_critical : barColor;
-          
+        barColor = (pctUsed > variables.warning_from_state) ? variables.bar_color_warning : barColor;
+        barColor = (pctUsed > variables.critical_from_state) ? variables.bar_color_critical : barColor;
+
         return `<div style="background-color:${variables.bar_color_background}">
                   <div style="background-color:${barColor};height:10px;width:${pctUsed}%"></div>
                 </div>`;
