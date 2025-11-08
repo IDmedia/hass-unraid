@@ -235,16 +235,8 @@ class DisksCollector(QueryCollector):
             return self._join_tokens('Disk', self._pretty_words(raw_name))
 
         if dtype == 'CACHE':
-            if base == 'cache' and num:
-                return self._join_tokens('Disk', 'Cache', 'Disk', num)
-            if base.startswith('cache'):
-                descriptor = base[len('cache'):].strip('_')
-                pretty_desc = self._pretty_words(descriptor) if descriptor else ''
-                return self._join_tokens('Disk', 'Cache', pretty_desc, num)
-            pretty = self._pretty_words(raw_name)
-            if pretty.lower().startswith('cache'):
-                return self._join_tokens('Disk', pretty)
-            return self._join_tokens('Disk', 'Cache', pretty)
+            pretty = self._pretty_words(base if base else raw_name)
+            return self._join_tokens('Disk', pretty, num)
 
         if dtype == 'PARITY':
             return self._join_tokens('Disk', 'Parity', num)

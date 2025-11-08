@@ -16,6 +16,20 @@ template:
         unit_of_measurement: "W"
         state: "{{ states('sensor.hisa_monitor_power') | float | round }}"
 
+      - name: "Kaya Empty slot"
+        state: 0
+        attributes:
+          size: 0
+          status: DISK_OK
+        icon: mdi:disk
+        
+      - name: "Hisa Empty slot"
+        state: 0
+        attributes:
+          size: 0
+          status: DISK_OK
+        icon: mdi:disk
+
   - sensor:
       - name: "UnRaid Smart Data"
         state: "{{ now() }}"

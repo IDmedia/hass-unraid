@@ -133,6 +133,7 @@ cards:
             'sensor.kaya_disk_18',
             'sensor.kaya_disk_19',
             'sensor.kaya_disk_20',
+            'sensor.kaya_empty_slot'
           ] 
         %}
 
