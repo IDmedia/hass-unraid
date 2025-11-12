@@ -1,4 +1,3 @@
-# app/main.py
 import os
 import signal
 import pkgutil
