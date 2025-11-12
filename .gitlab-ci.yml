@@ -16,7 +16,7 @@ docker-build:
   tags:
     - linux
   image:
-    name: docker:stable
+    name: docker:latest
   services:
    - name: docker:dind
      alias: docker
