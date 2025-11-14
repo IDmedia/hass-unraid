@@ -81,17 +81,7 @@ class SharesCollector(QueryCollector):
                 if free_kb == 0 and size_kb > 0:
                     free_kb = max(size_kb - used_kb, 0)
 
-            # Disk count from include (list or string)
-            include_val = s.get('include')
-            share_disk_count = self._count_includes(include_val)
-
-            # Floor: per-disk reserved space; floor is always KB
-            floor_kb_per_disk = self._to_int_safe(s.get('floor'))
-            floor_total_kb = share_disk_count * floor_kb_per_disk
-
-            # Apply floor by reducing free (usable capacity)
-            adjusted_free_kb = max(free_kb - floor_total_kb, 0)
-            total_kb = used_kb + adjusted_free_kb
+            total_kb = used_kb + free_kb
             used_pct = int(round((used_kb / total_kb) * 100)) if total_kb > 0 else 0
 
             payload = {
@@ -104,7 +94,7 @@ class SharesCollector(QueryCollector):
             # Lower-case all attribute keys; add computed fields in KB
             attributes = normalize_keys_lower(s)
             attributes['used'] = used_kb
-            attributes['free'] = adjusted_free_kb
+            attributes['free'] = free_kb
             attributes['size'] = total_kb
 
             updates.append(EntityUpdate(
