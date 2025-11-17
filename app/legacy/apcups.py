@@ -10,6 +10,7 @@ from app.collectors.base import EntityUpdate
 class ApcUpsChannel(LegacyChannel):
     name = 'apcups'
     channel = 'apcups'
+    inactivity_timeout = 0
 
     def __init__(self, logger, interval: int):
         self.logger = logger
