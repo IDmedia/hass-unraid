@@ -1,8 +1,8 @@
 import re
-import json
 import html
+import json
 import humanfriendly
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 from app.legacy.base import LegacyChannel
 from app.collectors.base import EntityUpdate
 
@@ -33,18 +33,17 @@ class ApcUpsChannel(LegacyChannel):
           - UPS Load (%)
           - UPS Output Voltage (V)
 
-        Immediate-first publish is handled by LegacyWSRunner; here we add expire_after so HA marks unavailable if stream stops.
+        Immediate-first publish is handled by LegacyWSRunner; here we add expire_after so HA marks
+        unavailable if stream stops.
         """
         updates: List[EntityUpdate] = []
 
-        # Replace escaped slashes and parse JSON array
         try:
             msg_data = msg_data.replace(r'\/', '/')
             parsed = json.loads(msg_data)
         except Exception:
             return updates
 
-        # Defensive: require at least 7 items
         if not isinstance(parsed, list) or len(parsed) < 7:
             return updates
 
@@ -59,14 +58,12 @@ class ApcUpsChannel(LegacyChannel):
                 return 0
 
         def extract_percentage_or_number(value: str, default: int = 0) -> int:
-            # percentage like "19 %"
             m_pct = re.search(r'(\d+)\s*%', value)
             if m_pct:
                 try:
                     return int(m_pct.group(1))
                 except Exception:
                     return default
-            # fallback: first numeric (int) part
             m_num = re.search(r'[\d.]+', value)
             if m_num:
                 try:
@@ -75,7 +72,6 @@ class ApcUpsChannel(LegacyChannel):
                     return default
             return default
 
-        # Clean raw fields
         ups_model_raw = clean_html(parsed[0])
         ups_status_raw = clean_html(parsed[1])
         battery_charge_raw = clean_html(parsed[2])
@@ -84,7 +80,6 @@ class ApcUpsChannel(LegacyChannel):
         ups_load_raw = clean_html(parsed[5])
         output_voltage_raw = clean_html(parsed[6])
 
-        # Normalize values
         model = '' if ups_model_raw == '-' else ups_model_raw
         status = '' if ups_status_raw == '-' else ups_status_raw
         battery_charge = extract_percentage_or_number(battery_charge_raw) if battery_charge_raw != '-' else 0
@@ -93,7 +88,6 @@ class ApcUpsChannel(LegacyChannel):
         ups_load = extract_percentage_or_number(ups_load_raw) if ups_load_raw != '-' else 0
         output_voltage = extract_percentage_or_number(output_voltage_raw) if output_voltage_raw != '-' else 0
 
-        # If no model, skip publishing (matches legacy behavior)
         if not model:
             return updates
 
@@ -108,7 +102,6 @@ class ApcUpsChannel(LegacyChannel):
         }
 
         for key, value in payloads.items():
-            # Skip empty string values for Model/Status
             if key in ('Model', 'Status') and not value:
                 continue
 
@@ -123,7 +116,6 @@ class ApcUpsChannel(LegacyChannel):
                 )
             }
 
-            # Numeric values get measurement + unit
             if isinstance(value, (int, float)):
                 payload['state_class'] = 'measurement'
                 unit = (
@@ -135,14 +127,16 @@ class ApcUpsChannel(LegacyChannel):
                 if unit:
                     payload['unit_of_measurement'] = unit
 
-            updates.append(EntityUpdate(
-                sensor_type='sensor',
-                payload=payload,
-                state=value,
-                retain=False,
-                expire_after=max(self.interval * 2, 60),
-                unique_id_suffix=key.lower().replace(' ', '_')
-            ))
+            updates.append(
+                EntityUpdate(
+                    sensor_type='sensor',
+                    payload=payload,
+                    state=value,
+                    retain=False,
+                    expire_after=max(self.interval * 2, 60),
+                    unique_id_suffix=key.lower().replace(' ', '_'),
+                )
+            )
 
         return updates
 

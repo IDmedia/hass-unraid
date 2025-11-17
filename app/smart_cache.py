@@ -1,7 +1,7 @@
 import os
-import json
 import time
-from typing import Dict, Any, Iterable, Optional
+import json
+from typing import Any, Dict, Iterable, Optional
 
 
 class SmartCache:
@@ -9,6 +9,7 @@ class SmartCache:
     Persistent SMART cache:
       store[disk_name] = {'data': <smart_attrs_dict>, 'last_update': <timestamp>}
     """
+
     def __init__(self, unraid_id: str, data_dir: str, logger):
         self.logger = logger
         self.path = os.path.join(data_dir, f'{unraid_id}_smart_cache.json')
@@ -16,7 +17,7 @@ class SmartCache:
         self._dirty = False
         self.load()
 
-    def load(self):
+    def load(self) -> None:
         if os.path.exists(self.path):
             try:
                 with open(self.path, 'r', encoding='utf-8') as f:
@@ -28,7 +29,7 @@ class SmartCache:
         else:
             self.store = {}
 
-    def save(self):
+    def save(self) -> None:
         if not self._dirty:
             return
         try:
@@ -39,7 +40,7 @@ class SmartCache:
         except Exception as e:
             self.logger.error(f'Failed to save SMART cache: {e}')
 
-    def update(self, disk_name: str, smart_attrs: Dict[str, Any], ts: Optional[float] = None):
+    def update(self, disk_name: str, smart_attrs: Dict[str, Any], ts: Optional[float] = None) -> None:
         self.store[disk_name] = {
             'data': smart_attrs,
             'last_update': ts if ts is not None else time.time(),
@@ -55,7 +56,7 @@ class SmartCache:
             return 0.0
         return float(entry.get('last_update') or 0.0)
 
-    def prune_to(self, valid_names: Iterable[str]):
+    def prune_to(self, valid_names: Iterable[str]) -> None:
         valid = set(valid_names)
         stale = [k for k in list(self.store.keys()) if k not in valid]
         if stale:

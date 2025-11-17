@@ -1,4 +1,3 @@
-from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -18,7 +17,7 @@ class EntityUpdate:
 class QueryCollector(Protocol):
     name: str
     interval: int
-    query: str
+    query: Optional[str]
 
     async def fetch(self) -> Dict[str, Any]:
         ...

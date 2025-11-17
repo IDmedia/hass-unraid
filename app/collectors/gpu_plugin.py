@@ -1,108 +1,93 @@
-import json
 import re
-from typing import Dict, List, Any, Optional
-
-import httpx
+import json
 from lxml import etree
-
-from .base import QueryCollector, EntityUpdate
 from app.utils import normalize_keys_lower
+from typing import Any, Dict, List, Optional
+from .base import EntityUpdate, QueryCollector
 
 
 class GpuPluginCollector(QueryCollector):
     """
-    Polls the Unraid GPU Stat plugin via HTTP (legacy webGui) and publishes GPU metrics.
+    Polls the Unraid GPU Stat plugin via legacy webGui endpoints.
 
-    Behavior:
-      - On first run, discovers the GPU list by fetching /Dashboard and parsing the gpustat_statusm(...) script.
-      - Then polls /plugins/gpustat/gpustatusmulti.php with ?gpus=<json> to get live stats.
-      - Publishes per-GPU sensors:
-          * {GPU name} Load (%)
-          * {GPU name} Memory Usage (%) with attributes {used,total}
-          * {GPU name} Fan Speed (%)
-          * {GPU name} Power Usage (W)
-          * {GPU name} Temperature (°C)
-          * {GPU name} (summary) with load % as state and all valid attributes
+    Flow:
+      - Discover GPU map once by parsing /Dashboard for gpustat_statusm({...}).
+      - Fetch live stats via /plugins/gpustat/gpustatusmulti.php?gpus=<json>.
+      - Publish per-GPU sensors and a summary entity.
 
-    Notes:
-      - Requires legacy auth (username/password) for Cookie. Set `requires_legacy_auth = True`.
-      - Uses immediate-first publish via the query collector loop (runs at start), then throttles to interval.
-      - Live metrics: retain=False with expire_after=max(interval*2, 60).
+    Requires legacy auth (Cookie). Uses LegacyHTTPContext implicitly through the provided legacy_ctx.
     """
+
     name = 'gpu_plugin'
     requires_legacy_auth = True
+    query = None  # not GraphQL-based
 
     def __init__(self, gql_client, logger, interval: int, legacy_ctx: Optional[Any] = None):
         self.gql = gql_client
         self.logger = logger
         self.interval = int(interval)
-        self.query = None  # not a GraphQL query; we override fetch() to use HTTP
         self.legacy_ctx = legacy_ctx
-        self.gpus: Optional[Dict[str, Any]] = None  # discovered GPU map
+        self.gpus: Optional[Dict[str, Any]] = None
 
     async def fetch(self) -> Dict[str, Any]:
         """
-        Returns plugin JSON data as a dict.
+        Returns plugin JSON data as a dict keyed by gpu_id.
         """
         if not self.legacy_ctx:
             self.logger.info('GPU plugin: legacy context missing; skipping')
             return {}
 
-        # Ensure GPUs are discovered once
         if self.gpus is None:
             await self._discover_gpus()
             if not self.gpus:
-                # self.logger.warning('GPU plugin: no GPUs discovered; skipping fetch')
                 return {}
 
-        cookie = await self.legacy_ctx.auth.get_cookie()
-        headers = {'Cookie': cookie}
-
-        url = f'{self.legacy_ctx.http_base_url}/plugins/gpustat/gpustatusmulti.php'
-        params = {'gpus': json.dumps(self.gpus)}
-
-        async with httpx.AsyncClient(verify=self.legacy_ctx.verify_ssl, timeout=30, follow_redirects=True) as http:
-            try:
-                r = await http.get(url, params=params, headers=headers)
-                if r.status_code != httpx.codes.OK:
-                    self.logger.warning(f'GPU plugin fetch failed: HTTP {r.status_code}')
-                    return {}
-                return r.json()
-            except Exception as e:
-                self.logger.error(f'GPU plugin fetch error: {e}')
+        try:
+            r = await self.legacy_ctx.http_get(
+                '/plugins/gpustat/gpustatusmulti.php',
+                params={'gpus': json.dumps(self.gpus)},
+                timeout=30,
+            )
+            if r.status_code != 200:
+                self.logger.warning(f'GPU plugin fetch failed: HTTP {r.status_code}')
                 return {}
+            return r.json()
+        except Exception as e:
+            self.logger.error(f'GPU plugin fetch error: {e}')
+            return {}
 
     async def parse(self, data: Dict[str, Any]) -> List[EntityUpdate]:
         updates: List[EntityUpdate] = []
-        if not data:
+        if not isinstance(data, dict) or not data:
             return updates
 
-        # data is a dict keyed by gpu_id => gpu_data
+        def is_valid(value: Any) -> bool:
+            invalid = {'N/A', 'N\\/A', 'Unknown', 'unknown', '', None}
+            if str(value).strip() in invalid:
+                return False
+            try:
+                cleaned = str(value)
+                for suffix in ['%', '°C', 'W']:
+                    cleaned = cleaned.replace(suffix, '')
+                float(cleaned.strip())
+                return True
+            except Exception:
+                return False
+
         for gpu_id, gpu_data in data.items():
-            # Defensive: ensure dict
             if not isinstance(gpu_data, dict):
                 continue
 
-            name = gpu_data.get('name', f'GPU {gpu_id}')
+            name = str(gpu_data.get('name') or f'GPU {gpu_id}')
 
-            def is_valid(value: Any) -> bool:
-                invalid_values = {'N/A', 'N\\/A', 'Unknown', 'unknown', '', None}
-                if str(value).strip() in invalid_values:
-                    return False
-                # Check numeric values with potential units
-                try:
-                    cleaned = str(value).replace('%', '').replace('°C', '').replace('W', '').strip()
-                    float(cleaned)
-                    return True
-                except Exception:
-                    return False
-
-            # Load
             util = gpu_data.get('util')
             if is_valid(util):
                 try:
                     load_pct = int(float(str(util).replace('%', '').strip()))
-                    updates.append(EntityUpdate(
+                except Exception:
+                    load_pct = 0
+                updates.append(
+                    EntityUpdate(
                         sensor_type='sensor',
                         payload={
                             'name': f'{name} Load',
@@ -113,40 +98,42 @@ class GpuPluginCollector(QueryCollector):
                         state=load_pct,
                         retain=False,
                         expire_after=max(self.interval * 2, 60),
-                        unique_id_suffix=f'{gpu_id}_load'
-                    ))
-                except Exception:
-                    pass
+                        unique_id_suffix=f'{gpu_id}_load',
+                    )
+                )
 
-            # Memory
             if all(is_valid(gpu_data.get(k)) for k in ['memutil', 'memused', 'memtotal']):
                 try:
                     mem_used = int(float(gpu_data['memused']))
                     mem_total = int(float(gpu_data['memtotal']))
                     mem_pct = int(float(str(gpu_data['memutil']).replace('%', '').strip()))
-                    updates.append(EntityUpdate(
-                        sensor_type='sensor',
-                        payload={
-                            'name': f'{name} Memory Usage',
-                            'unit_of_measurement': '%',
-                            'icon': 'mdi:memory',
-                            'state_class': 'measurement',
-                        },
-                        state=mem_pct,
-                        attributes={'used': mem_used, 'total': mem_total},
-                        retain=False,
-                        expire_after=max(self.interval * 2, 60),
-                        unique_id_suffix=f'{gpu_id}_mem'
-                    ))
+                    updates.append(
+                        EntityUpdate(
+                            sensor_type='sensor',
+                            payload={
+                                'name': f'{name} Memory Usage',
+                                'unit_of_measurement': '%',
+                                'icon': 'mdi:memory',
+                                'state_class': 'measurement',
+                            },
+                            state=mem_pct,
+                            attributes={'used': mem_used, 'total': mem_total},
+                            retain=False,
+                            expire_after=max(self.interval * 2, 60),
+                            unique_id_suffix=f'{gpu_id}_mem',
+                        )
+                    )
                 except Exception:
                     pass
 
-            # Fan
             fan = gpu_data.get('fan')
             if is_valid(fan):
                 try:
                     fan_pct = int(float(str(fan).replace('%', '').strip()))
-                    updates.append(EntityUpdate(
+                except Exception:
+                    fan_pct = 0
+                updates.append(
+                    EntityUpdate(
                         sensor_type='sensor',
                         payload={
                             'name': f'{name} Fan Speed',
@@ -157,17 +144,18 @@ class GpuPluginCollector(QueryCollector):
                         state=fan_pct,
                         retain=False,
                         expire_after=max(self.interval * 2, 60),
-                        unique_id_suffix=f'{gpu_id}_fan'
-                    ))
-                except Exception:
-                    pass
+                        unique_id_suffix=f'{gpu_id}_fan',
+                    )
+                )
 
-            # Power
             power = gpu_data.get('power')
             if is_valid(power):
                 try:
                     power_w = int(float(str(power).replace('W', '').strip()))
-                    updates.append(EntityUpdate(
+                except Exception:
+                    power_w = 0
+                updates.append(
+                    EntityUpdate(
                         sensor_type='sensor',
                         payload={
                             'name': f'{name} Power Usage',
@@ -178,17 +166,18 @@ class GpuPluginCollector(QueryCollector):
                         state=power_w,
                         retain=False,
                         expire_after=max(self.interval * 2, 60),
-                        unique_id_suffix=f'{gpu_id}_power'
-                    ))
-                except Exception:
-                    pass
+                        unique_id_suffix=f'{gpu_id}_power',
+                    )
+                )
 
-            # Temperature
             temp = gpu_data.get('temp')
             if is_valid(temp):
                 try:
                     temp_c = int(float(str(temp).replace('°C', '').strip()))
-                    updates.append(EntityUpdate(
+                except Exception:
+                    temp_c = 0
+                updates.append(
+                    EntityUpdate(
                         sensor_type='sensor',
                         payload={
                             'name': f'{name} Temperature',
@@ -200,71 +189,67 @@ class GpuPluginCollector(QueryCollector):
                         state=temp_c,
                         retain=False,
                         expire_after=max(self.interval * 2, 60),
-                        unique_id_suffix=f'{gpu_id}_temp'
-                    ))
-                except Exception:
-                    pass
+                        unique_id_suffix=f'{gpu_id}_temp',
+                    )
+                )
 
-            # Summary sensor: load as state, attributes = all valid fields (lowercased keys)
             if is_valid(util):
                 try:
                     load_pct = int(float(str(util).replace('%', '').strip()))
                     valid_attrs = {k: v for k, v in gpu_data.items() if is_valid(v)}
-                    # Lowercase keys for consistency
                     valid_attrs = normalize_keys_lower(valid_attrs)
-                    updates.append(EntityUpdate(
-                        sensor_type='sensor',
-                        payload={
-                            'name': name,
-                            'icon': 'mdi:expansion-card',
-                            'unit_of_measurement': '%',
-                            'state_class': 'measurement',
-                        },
-                        state=load_pct,
-                        attributes=valid_attrs,
-                        retain=False,
-                        expire_after=max(self.interval * 2, 60),
-                        unique_id_suffix=f'{gpu_id}_summary'
-                    ))
+                    updates.append(
+                        EntityUpdate(
+                            sensor_type='sensor',
+                            payload={
+                                'name': name,
+                                'icon': 'mdi:expansion-card',
+                                'unit_of_measurement': '%',
+                                'state_class': 'measurement',
+                            },
+                            state=load_pct,
+                            attributes=valid_attrs,
+                            retain=False,
+                            expire_after=max(self.interval * 2, 60),
+                            unique_id_suffix=f'{gpu_id}_summary',
+                        )
+                    )
                 except Exception:
                     pass
 
         return updates
 
-    async def _discover_gpus(self):
+    async def _discover_gpus(self) -> None:
         """
-        Fetch /Dashboard and parse gpustat_statusm({ ... }) to discover GPU map.
+        Fetch /Dashboard and parse gpustat_statusm(...) to discover GPUs.
         """
         if not self.legacy_ctx:
             return
 
-        cookie = await self.legacy_ctx.auth.get_cookie()
-        headers = {'Cookie': cookie}
-        url = f'{self.legacy_ctx.http_base_url}/Dashboard'
+        try:
+            r = await self.legacy_ctx.http_get('/Dashboard', timeout=30)
+            if r.status_code != 200:
+                self.logger.warning(f'GPU discovery failed: HTTP {r.status_code}')
+                return
 
-        async with httpx.AsyncClient(verify=self.legacy_ctx.verify_ssl, timeout=30, follow_redirects=True) as http:
-            try:
-                r = await http.get(url, headers=headers)
-                if r.status_code != httpx.codes.OK:
-                    self.logger.warning(f'GPU discovery failed: HTTP {r.status_code}')
-                    return
-                tree = etree.HTML(r.text)
-                script_nodes = tree.xpath('.//script[contains(text(), "gpustat_statusm")]')
-                if not script_nodes:
-                    # self.logger.info('GPU plugin discovery: gpustat_statusm script not found')
-                    return
-                script_text = script_nodes[0].text or ''
-                m = re.search(r'gpustat_statusm\((\{.+?\})\)', script_text, re.DOTALL)
-                if not m:
-                    self.logger.info('GPU plugin discovery: unable to match gpustat_statusm JSON')
-                    return
-                gpus_json = m.group(1)
-                gpus_obj = json.loads(gpus_json)
-                if isinstance(gpus_obj, dict) and gpus_obj:
-                    self.gpus = gpus_obj
-                    self.logger.info('GPU plugin: GPUs discovered')
-            except Exception as e:
-                self.logger.error(f'GPU discovery error: {e}')
+            tree = etree.HTML(r.text)
+            script_nodes = tree.xpath('.//script[contains(text(), "gpustat_statusm")]')
+            if not script_nodes:
+                return
+
+            script_text = script_nodes[0].text or ''
+            m = re.search(r'gpustat_statusm\((\{.+?\})\)', script_text, re.DOTALL)
+            if not m:
+                self.logger.info('GPU plugin discovery: unable to match gpustat_statusm JSON')
+                return
+
+            gpus_json = m.group(1)
+            gpus_obj = json.loads(gpus_json)
+            if isinstance(gpus_obj, dict) and gpus_obj:
+                self.gpus = gpus_obj
+                self.logger.info('GPU plugin: GPUs discovered')
+        except Exception as e:
+            self.logger.error(f'GPU discovery error: {e}')
 
 
 COLLECTOR = GpuPluginCollector

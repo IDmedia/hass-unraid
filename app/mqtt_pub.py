@@ -2,26 +2,26 @@ import json
 import asyncio
 from typing import Any, Dict, Optional
 from gmqtt import Client as MQTTClient, Message
-from .utils import normalize_str, calculate_hash
+from .utils import calculate_hash, normalize_str
 
 
 class MQTTPublisher:
-    def __init__(self, name: str, mqtt_config: Dict[str, Any], loop, logger, scan_interval: int):
+    def __init__(self, name: str, mqtt_config: Dict[str, Any], loop: asyncio.AbstractEventLoop, logger, scan_interval: int):
         self.name = name
         self.loop = loop
         self.logger = logger
         self.scan_interval = scan_interval
         self.mqtt_config = mqtt_config
         self.mqtt_connected = False
-        self.parser_hashes = {}
+        self.parser_hashes: Dict[str, str] = {}
         self._stopping = False
-        self.global_device_overrides: Dict[str, Any] = {}  # NEW: applied to all device dicts
-
+        self.global_device_overrides: Dict[str, Any] = {}
         self._unraid_id = normalize_str(self.name)
-        self._client = MQTTClient(self.name, will_message=Message(
-            f'unraid/{self._unraid_id}/connectivity/state', 'OFF', retain=True
-        ))
 
+        self._client = MQTTClient(
+            self.name,
+            will_message=Message(f'unraid/{self._unraid_id}/connectivity/state', 'OFF', retain=True),
+        )
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
@@ -34,17 +34,18 @@ class MQTTPublisher:
         self._connect_task = asyncio.create_task(self._connect_loop())
         self._connectivity_task = asyncio.create_task(self._periodic_connectivity_update())
 
-    def set_device_overrides(self, overrides: Dict[str, Any]):
+    def set_device_overrides(self, overrides: Dict[str, Any]) -> None:
         """
         Set or update global device overrides (e.g., {'sw_version': '7.2.0'}).
         These will be merged into the device block for all published entities.
         """
         self.global_device_overrides.update(overrides or {})
 
-    async def _connect_loop(self):
+    async def _connect_loop(self) -> None:
         host = self.mqtt_config.get('host')
         port = self.mqtt_config.get('port', 1883)
         backoff = 5
+
         while True:
             try:
                 self.logger.info(f'Connecting to MQTT server... ({host}:{port})')
@@ -55,12 +56,12 @@ class MQTTPublisher:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 
-    def _on_connect(self, client, flags, rc, properties):
+    def _on_connect(self, client, flags, rc, properties) -> None:
         self.logger.info('Successfully connected to MQTT server')
         self.mqtt_connected = True
         self.mqtt_status(True)
 
-    def _on_disconnect(self, client, packet, exc=None):
+    def _on_disconnect(self, client, packet, exc=None) -> None:
         level = self.logger.info if self._stopping else self.logger.error
         level('Disconnected from MQTT server')
         self.mqtt_connected = False
@@ -69,14 +70,14 @@ class MQTTPublisher:
         except Exception as e:
             self.logger.exception(f'Failed to update connectivity status on disconnect: {e}')
 
-    def _on_message(self, client, topic, payload, qos, properties):
+    def _on_message(self, client, topic, payload, qos, properties) -> None:
         self.logger.info(f'Message received: {topic}')
 
-    def mqtt_status(self, connected: bool):
+    def mqtt_status(self, connected: bool) -> None:
         payload = {'name': 'Connectivity', 'device_class': 'connectivity'}
         self.publish(payload, 'binary_sensor', 'ON' if connected else 'OFF', retain=True)
 
-    async def _periodic_connectivity_update(self):
+    async def _periodic_connectivity_update(self) -> None:
         last = None
         while True:
             try:
@@ -111,7 +112,7 @@ class MQTTPublisher:
         device_overrides: Optional[Dict[str, Any]] = None,
         unique_id_suffix: Optional[str] = None,
         expire_after: Optional[int] = None,
-    ):
+    ) -> None:
         if not self._client or not self.mqtt_connected:
             self.logger.debug(f'MQTT not connected; skip publish: {payload.get("name")}')
             return
@@ -131,6 +132,7 @@ class MQTTPublisher:
             'model': 'Unraid',
             'manufacturer': 'Lime Technology',
         }
+
         if self.global_device_overrides:
             device.update(self.global_device_overrides)
         if device_overrides:
@@ -145,7 +147,6 @@ class MQTTPublisher:
         if expire_after is not None:
             config_payload['expire_after'] = expire_after
 
-        # Detect first-time/structure change
         is_new = self._has_structure_changed(unraid_sensor_id, config_payload)
         if is_new:
             self.logger.info(f'Publishing updated config for sensor "{payload["name"]}"')
@@ -158,32 +159,29 @@ class MQTTPublisher:
             self._client.publish(
                 f'homeassistant/{sensor_type}/{unraid_sensor_id}/config',
                 json.dumps(cfg),
-                retain=True
+                retain=True,
             )
 
-        # Retain first state/attributes right after config to avoid HA race
         state_retain = retain or is_new
         attrs_retain = retain or is_new
 
-        # State
         if state_value is not None:
             self._client.publish(
                 f'unraid/{unraid_id}/{topic_name}/state',
                 state_value if isinstance(state_value, str)
                 else json.dumps(state_value) if not isinstance(state_value, (int, float))
                 else str(state_value),
-                retain=state_retain
+                retain=state_retain,
             )
 
-        # Attributes
         if json_attributes:
             self._client.publish(
                 f'unraid/{unraid_id}/{topic_name}/attributes',
                 json.dumps(json_attributes),
-                retain=attrs_retain
+                retain=attrs_retain,
             )
 
-    async def aclose(self):
+    async def aclose(self) -> None:
         try:
             self._stopping = True
             self.mqtt_status(False)

@@ -9,7 +9,7 @@ from lxml import etree
 from typing import Any, Callable, Dict
 
 
-def load_file(path_to_file: str):
+def load_file(path_to_file: str) -> Dict[str, Any]:
     if not os.path.isfile(path_to_file):
         return {}
     _, extension = os.path.splitext(path_to_file)
@@ -22,63 +22,49 @@ def load_file(path_to_file: str):
             return {}
 
 
-def parse_smart_data(html_data, logger):
+def parse_smart_data(html_data: str, logger) -> Dict[str, Any]:
     """
     Parses the SMART table HTML response and converts it into a snake_case key-value JSON format.
-    The key is the "Attribute Name" (converted to snake_case), and the value is extracted from
+
+    The key is the 'Attribute Name' (converted to snake_case), and the value is extracted from
     the rightmost column with data for that row. Numeric values are converted to int or float.
     """
-    def to_snake_case(name):
-        """
-        Convert a given name to snake_case.
-        E.g., "Raw read error rate" -> "raw_read_error_rate"
-        """
+
+    def to_snake_case(name: str) -> str:
         return re.sub(r'\W+', '_', name).strip('_').lower()
 
-    def parse_value(value):
-        """
-        Convert a string to an int or float if it is numeric; otherwise, return the original string.
-        """
+    def parse_value(value: str) -> Any:
         try:
-            # Try to parse as integer
             return int(value)
         except ValueError:
             try:
-                # Try to parse as float
                 return float(value)
             except ValueError:
-                # Return as-is if it's not a number
                 return value
 
     try:
-        # Parse the provided HTML data
         tree = etree.HTML(html_data)
         rows = tree.xpath('//tr')
+        smart_data: Dict[str, Any] = {}
 
-        smart_data = {}
         for row in rows:
-            # Extract all <td> columns in the current row
             columns = row.xpath('td')
             if len(columns) < 2:
-                continue  # Skip rows with insufficient data
+                continue
 
-            # Extract "Attribute Name" (2nd column's text content)
             attribute_name = columns[1].text.strip() if columns[1].text else ''
             if not attribute_name:
-                continue  # Skip rows without a valid "Attribute Name"
+                continue
 
-            # Convert the "Attribute Name" to snake_case
             snake_case_attr_name = to_snake_case(attribute_name)
 
-            # Find the rightmost column with a non-empty value
             value = None
-            for col in reversed(columns):  # Start from the last column and move left
-                cell_text = col.text.strip() if col.text else ''  # Get text for the cell
-                if cell_text:  # Check if the cell has text content
-                    value = parse_value(cell_text)  # Parse value as number if numeric
+            for col in reversed(columns):
+                cell_text = col.text.strip() if col.text else ''
+                if cell_text:
+                    value = parse_value(cell_text)
                     break
 
-            # Add the Attribute Name (in snake_case) and its Value to the dictionary, if both are valid
             if snake_case_attr_name and value is not None:
                 smart_data[snake_case_attr_name] = value
 
@@ -96,8 +82,7 @@ def normalize_str(string: str) -> str:
 
 def normalize_keys_lower(obj: Any) -> Any:
     """
-    Recursively lower-case dict keys.
-    Lists are processed element-wise; non-dict types are returned as-is.
+    Recursively lower-case dict keys. Lists are processed element-wise; non-dict types are returned as-is.
     """
     if isinstance(obj, dict):
         return {str(k).lower(): normalize_keys_lower(v) for k, v in obj.items()}
@@ -111,7 +96,6 @@ def to_snake_case(name: str) -> str:
     Convert camelCase/PascalCase/mixed to snake_case lower.
     Examples: 'nameOrig' -> 'name_orig', 'splitLevel' -> 'split_level', 'URLValue' -> 'url_value'
     """
-    # Insert underscore before capitals, collapse multiple underscores, lower-case
     s1 = re.sub(r'([A-Z]+)', r'_\1', name).strip('_')
     s2 = re.sub(r'__+', r'_', s1)
     return s2.lower()
@@ -147,6 +131,7 @@ def log_errors(context: str) -> Callable:
     """
     Decorator for async functions to catch and log errors with context.
     """
+
     def decorator(func: Callable):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
@@ -163,5 +148,7 @@ def log_errors(context: str) -> Callable:
                 else:
                     print(f'Error in "{context}": {type(e).__name__} - {e}')
                 return None
+
         return wrapper
+
     return decorator

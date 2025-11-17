@@ -1,7 +1,7 @@
 import re
 import json
 import humanfriendly
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 from app.legacy.base import LegacyChannel
 from app.collectors.base import EntityUpdate
 
@@ -28,12 +28,12 @@ class ParityChannel(LegacyChannel):
           - sync_errors_corrected (int/string)
         """
         updates: List[EntityUpdate] = []
+
         try:
             data = json.loads(msg_data)
         except Exception:
             return updates
 
-        # Minimal length check (need at least total, elapsed, position, speed, finish)
         if not isinstance(data, list) or len(data) < 5:
             return updates
 
@@ -44,7 +44,6 @@ class ParityChannel(LegacyChannel):
         finish_text = str(data[4]) if len(data) > 4 else ''
         errors_val = data[5] if len(data) > 5 else 0
 
-        # Extract "X (Y %)" -> X size and Y percent
         position_size_bytes = 0
         pct_value = 0.0
         m = re.search(r'(.+?)\s*\(([\d.]+)\s*%\)', position_text)
@@ -54,11 +53,10 @@ class ParityChannel(LegacyChannel):
             pct_value = _to_float_safe(pct_part, default=0.0)
             position_size_bytes = _parse_size_safe(size_part)
         else:
-            # Try to parse size anyway if present
             position_size_bytes = _parse_size_safe(position_text)
 
         total_size_bytes = _parse_size_safe(total_text)
-        estimated_speed_bytes = _parse_size_safe(speed_text)  # may return 0 if not parseable (e.g., "MB/sec")
+        estimated_speed_bytes = _parse_size_safe(speed_text)
 
         attributes: Dict[str, Any] = {
             'total_size': total_size_bytes,
@@ -69,20 +67,22 @@ class ParityChannel(LegacyChannel):
             'sync_errors_corrected': errors_val,
         }
 
-        updates.append(EntityUpdate(
-            sensor_type='sensor',
-            payload={
-                'name': 'Parity Check',
-                'unit_of_measurement': '%',
-                'icon': 'mdi:database-eye',
-                'state_class': 'measurement'
-            },
-            state=pct_value,
-            attributes=attributes,
-            retain=False,
-            expire_after=max(self.interval * 2, 60),
-            unique_id_suffix='parity_check'
-        ))
+        updates.append(
+            EntityUpdate(
+                sensor_type='sensor',
+                payload={
+                    'name': 'Parity Check',
+                    'unit_of_measurement': '%',
+                    'icon': 'mdi:database-eye',
+                    'state_class': 'measurement',
+                },
+                state=pct_value,
+                attributes=attributes,
+                retain=False,
+                expire_after=max(self.interval * 2, 60),
+                unique_id_suffix='parity_check',
+            )
+        )
 
         return updates
 
