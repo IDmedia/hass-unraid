@@ -563,12 +563,14 @@ class UnraidGraphQLIntegration:
 
     async def _run_legacy_channel(self, channel: LegacyChannel) -> None:
         publish_fn = self.mqtt.publish if self.mqtt else (lambda **_kwargs: None)
+        inactivity_timeout = getattr(channel, 'inactivity_timeout', None)
         await self._legacy_runner.run_channel(
             channel_name=channel.channel,
             parse_fn=channel.parse,
             publish_fn=publish_fn,
             interval_seconds=max(1, int(getattr(channel, 'interval', self.scan_interval))),
             stop_event=self._stop_all,
+            inactivity_timeout=inactivity_timeout,
         )
 
     async def _run_query_collector(self, collector) -> None:

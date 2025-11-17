@@ -9,6 +9,7 @@ from app.collectors.base import EntityUpdate
 class ParityChannel(LegacyChannel):
     name = 'parity'
     channel = 'parity'
+    inactivity_timeout = 0
 
     def __init__(self, logger, interval: int):
         self.logger = logger
