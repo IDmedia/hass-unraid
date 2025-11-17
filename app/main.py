@@ -6,6 +6,7 @@ import asyncio
 import pkgutil
 import importlib
 import ssl as ssl_mod
+from hashlib import sha256
 from urllib.parse import urljoin
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -54,10 +55,16 @@ class LegacyHTTPContext:
 
     async def _fetch_gui_csrf(self, cookie: str) -> str:
         """
-        Fetch /Dashboard and scrape the GUI CSRF token from the page:
-          var csrf_token = "ABC123...";
+        Fetch /Dashboard and scrape the GUI CSRF token from the page.
+        Adds Referer/Origin and logs whether a token was found.
         """
-        headers = {'Cookie': cookie}
+        headers = {
+            'Cookie': cookie,
+            'Referer': urljoin(self.http_base_url + '/', 'Dashboard'),
+            'Origin': self.http_base_url,
+            'Accept': 'text/html,application/xhtml+xml',
+            'User-Agent': 'unraid-integration/1.0 (+httpx)',
+        }
         url = urljoin(self.http_base_url + '/', 'Dashboard')
         try:
             async with httpx.AsyncClient(
@@ -68,16 +75,30 @@ class LegacyHTTPContext:
             ) as http:
                 r = await http.get(url, headers=headers)
                 text = r.text or ''
-                m = re.search(r'var\s+csrf_token\s*=\s*"([A-Za-z0-9]+)"', text)
-                return m.group(1) if m else ''
-        except Exception:
+                # More permissive: capture anything until the next quote
+                m = re.search(r'var\s+csrf_token\s*=\s*"([^"]+)"', text)
+                if not m:
+                    # Optional fallback: meta tag variant
+                    m = re.search(
+                        r'<meta[^>]+name=["\']csrf_token["\'][^>]+content=["\']([^"\']+)["\']',
+                        text,
+                        flags=re.IGNORECASE
+                    )
+                token = m.group(1) if m else ''
+                if self.logger:
+                    self.logger.debug(
+                        'CSRF scrape: status=%s url=%s login=%s token_len=%d',
+                        r.status_code, str(r.url), 'yes' if self._is_login_response(r) else 'no', len(token)
+                    )
+                return token
+        except Exception as e:
+            if self.logger:
+                self.logger.debug('CSRF scrape error: %s', e)
             return ''
 
     async def refresh_session(self, force_login: bool = True) -> Tuple[str, str]:
         """
-        Refresh cookie and CSRF:
-          - If force_login=True: invalidate and re-login to obtain a fresh cookie, then GET /Dashboard to scrape CSRF.
-          - If False: use current cookie and just refresh CSRF from /Dashboard.
+        Strong refresh (force_login=True) or light refresh (False).
         """
         async with self._lock:
             if force_login:
@@ -85,35 +106,49 @@ class LegacyHTTPContext:
                     self.auth.invalidate()
                 except Exception:
                     pass
-                cookie = await self.auth.get_cookie(force=True)
-            else:
-                cookie = await self.auth.get_cookie(force=False)
-
+            cookie = await self.auth.get_cookie(force=force_login)
             csrf = await self._fetch_gui_csrf(cookie) or ''
             self._cookie_header = cookie
             self._csrf = csrf
             self._last_csrf_refresh_ts = asyncio.get_event_loop().time()
             if self.logger:
-                self.logger.debug('Legacy session refreshed (login=%s)', 'yes' if force_login else 'no')
+                self.logger.debug('Legacy session refreshed (login=%s, csrf_len=%d)',
+                                  'yes' if force_login else 'no', len(csrf))
             return cookie, csrf
 
-    async def ensure_fresh_session(self) -> Tuple[str, str]:
+    async def ensure_fresh_session(self, allow_relogin: bool = True) -> Tuple[str, str]:
         """
         Ensure cookie+CSRF are up-to-date:
-          - If cookie changed since last use or CSRF stale (by interval), refresh CSRF from /Dashboard.
-          - If CSRF still empty, force a re-login and re-scrape CSRF.
+          - If cookie changed since last use or CSRF stale, refresh CSRF from /Dashboard.
+          - If CSRF still empty: re-login only if allow_relogin=True.
         """
         async with self._lock:
             current_cookie = await self.auth.get_cookie(force=False)
             now = asyncio.get_event_loop().time()
             cookie_changed = (self._cookie_header != current_cookie)
             csrf_stale = (now - self._last_csrf_refresh_ts) >= self._csrf_refresh_interval
+            csrf_missing = not self._csrf
 
-            if cookie_changed or csrf_stale or not self._csrf:
+            if self.logger:
+                def _hash(s: Optional[str]) -> str:
+                    return sha256((s or '').encode()).hexdigest()[:8]
+                self.logger.debug(
+                    'ensure_fresh_session: cookie_changed=%s, csrf_stale=%s, csrf_missing=%s '
+                    '(cookie_hash=%s, cached_cookie_hash=%s)',
+                    cookie_changed, csrf_stale, csrf_missing, _hash(current_cookie), _hash(self._cookie_header)
+                )
+
+            if cookie_changed or csrf_stale or csrf_missing:
                 csrf = await self._fetch_gui_csrf(current_cookie) or ''
-                if not csrf:
+                if not csrf and allow_relogin:
+                    # As a last resort, force a re-login to scrape CSRF
                     current_cookie = await self.auth.get_cookie(force=True)
                     csrf = await self._fetch_gui_csrf(current_cookie) or ''
+                    if self.logger:
+                        self.logger.debug('ensure_fresh_session: forced re-login; csrf_len=%d', len(csrf))
+                elif not csrf and self.logger and not allow_relogin:
+                    self.logger.warning('ensure_fresh_session: CSRF scrape failed; preserving cookie (no re-login)')
+
                 self._cookie_header = current_cookie
                 self._csrf = csrf
                 self._last_csrf_refresh_ts = now
@@ -123,12 +158,10 @@ class LegacyHTTPContext:
     async def get_session(self, force: bool = False) -> Tuple[str, str]:
         """
         Return (cookie, csrf_token).
-          - If force=True: re-login and re-scrape CSRF (strong refresh).
-          - Else: ensure session freshness without re-login if possible.
         """
         if force:
             return await self.refresh_session(force_login=True)
-        return await self.ensure_fresh_session()
+        return await self.ensure_fresh_session(allow_relogin=True)
 
     @staticmethod
     def _is_login_response(r: httpx.Response) -> bool:
@@ -147,7 +180,7 @@ class LegacyHTTPContext:
 
     async def http_get(self, path: str, *, params: Optional[dict] = None, timeout: int = 30, headers: Optional[dict] = None):
         """
-        GET with Cookie (+ csrf_token param for convenience), and retry once on 401/403 or login-page response.
+        GET with Cookie (+ csrf_token param), and retry once on 401/403 or login-page response.
         """
         cookie, csrf = await self.get_session(force=False)
         hdrs = {'Cookie': cookie}
@@ -156,7 +189,6 @@ class LegacyHTTPContext:
         p = dict(params or {})
         p.setdefault('csrf_token', csrf)
         url = urljoin(self.http_base_url + '/', path)
-
         async with httpx.AsyncClient(
             verify=self.verify_ssl,
             timeout=timeout,
@@ -165,6 +197,8 @@ class LegacyHTTPContext:
         ) as http:
             r = await http.get(url, params=p, headers=hdrs)
             if r.status_code in (401, 403) or self._is_login_response(r):
+                if self.logger:
+                    self.logger.info(f'Legacy GET {path}: auth failed ({r.status_code}), retrying with strong refresh')
                 cookie, csrf = await self.get_session(force=True)
                 hdrs['Cookie'] = cookie
                 p['csrf_token'] = csrf
@@ -173,11 +207,7 @@ class LegacyHTTPContext:
 
     async def http_post_form(self, path: str, *, form: Optional[dict] = None, timeout: int = 30, headers: Optional[dict] = None):
         """
-        POST with URL-encoded form body, matching Unraid UI:
-          Content-Type: application/x-www-form-urlencoded; charset=UTF-8
-          X-Requested-With: XMLHttpRequest
-          Body: urlencode(form)
-        Retries once on 401/403 or login-page response with refreshed Cookie+CSRF.
+        POST with URL-encoded form body. Retries on 401/403 or login-page response.
         """
         cookie, csrf = await self.get_session(force=False)
         hdrs = {
@@ -187,14 +217,11 @@ class LegacyHTTPContext:
         }
         if headers:
             hdrs.update(headers)
-
         from urllib.parse import urlencode
-
         form_data = dict(form or {})
         form_data.setdefault('csrf_token', csrf)
         body = urlencode(form_data, doseq=True)
         url = urljoin(self.http_base_url + '/', path)
-
         async with httpx.AsyncClient(
             verify=self.verify_ssl,
             timeout=timeout,
@@ -204,7 +231,7 @@ class LegacyHTTPContext:
             r = await http.post(url, content=body, headers=hdrs)
             if r.status_code in (401, 403) or self._is_login_response(r):
                 if self.logger:
-                    self.logger.debug('Legacy POST strong refresh (401/403/login page); retrying with fresh session')
+                    self.logger.info(f'Legacy POST {path}: auth failed ({r.status_code}), retrying with strong refresh')
                 cookie, csrf = await self.get_session(force=True)
                 hdrs['Cookie'] = cookie
                 form_data['csrf_token'] = csrf
@@ -444,21 +471,23 @@ class UnraidGraphQLIntegration:
 
     async def _session_refresher(self) -> None:
         """
-        Light CSRF refresher task: refresh CSRF from /Dashboard every N seconds while online.
-        No login unless CSRF cannot be scraped (then force login once).
+        Light CSRF refresher while online. Never forces a re-login.
         """
         while self._started and not self._stop_all.is_set():
             try:
                 if self.legacy_ctx:
-                    await self.legacy_ctx.ensure_fresh_session()
-            except Exception:
-                pass
+                    await self.legacy_ctx.ensure_fresh_session(allow_relogin=False)
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f'Session refresher error: {e}')
             await asyncio.sleep(self.legacy_ctx._csrf_refresh_interval if self.legacy_ctx else 600)
 
     async def _start_runtime(self) -> None:
         if self.legacy_ctx:
             try:
-                await self.legacy_ctx.refresh_session(force_login=True)
+                cookie, csrf = await self.legacy_ctx.refresh_session(force_login=True)
+                if not csrf and self.logger:
+                    self.logger.warning('Legacy session refreshed but CSRF token is empty; legacy HTTP may fail')
             except Exception as e:
                 self.logger.error(f'Legacy session refresh failed: {e}')
 
@@ -562,8 +591,9 @@ class UnraidGraphQLIntegration:
                         )
             except asyncio.CancelledError:
                 break
-            except Exception:
-                pass
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f'Query collector "{getattr(collector, "name", "?")}" error: {e}')
 
             try:
                 await asyncio.wait_for(self._stop_all.wait(), timeout=interval)
@@ -599,20 +629,25 @@ class UnraidGraphQLIntegration:
                                 unique_id_suffix=upd.unique_id_suffix,
                                 expire_after=upd.expire_after,
                             )
-                except Exception:
-                    pass
+                except Exception as e:
+                    if not self._stop_all.is_set():
+                        self.logger.error(f'Subscription collector "{getattr(collector, "name", "?")}" parse/publish error: {e}')
 
             async def receiver_loop(session):
-                async for event in session.subscribe(gql(collector.subscription_query)):
-                    try:
-                        while True:
-                            event_queue.get_nowait()
-                            event_queue.task_done()
-                    except asyncio.QueueEmpty:
-                        pass
-                    await event_queue.put(event)
-                    if stop_local.is_set() or self._stop_all.is_set():
-                        break
+                try:
+                    async for event in session.subscribe(gql(collector.subscription_query)):
+                        try:
+                            while True:
+                                event_queue.get_nowait()
+                                event_queue.task_done()
+                        except asyncio.QueueEmpty:
+                            pass
+                        await event_queue.put(event)
+                        if stop_local.is_set() or self._stop_all.is_set():
+                            break
+                except Exception as e:
+                    if not (stop_local.is_set() or self._stop_all.is_set()):
+                        self.logger.error(f'Subscription collector "{getattr(collector, "name", "?")}" receiver failed: {e}')
 
             async def publisher_loop():
                 while event_queue.empty() and not (stop_local.is_set() or self._stop_all.is_set()):
@@ -651,7 +686,8 @@ class UnraidGraphQLIntegration:
                 if self.ws_base.startswith('wss') and not self.verify_ssl:
                     ssl_ctx = ssl_mod._create_unverified_context()
 
-                transport = WebsocketsTransport(url=urljoin(self.ws_base + '/', 'graphql'), init_payload=init_payload, ssl=ssl_ctx)
+                transport = WebsocketsTransport(url=urljoin(self.ws_base + '/', 'graphql'),
+                                                init_payload=init_payload, ssl=ssl_ctx)
                 client = Client(transport=transport, fetch_schema_from_transport=False)
 
                 async with client as session:
@@ -666,12 +702,14 @@ class UnraidGraphQLIntegration:
                         pub_task.cancel()
 
                 if not self._stop_all.is_set():
+                    self.logger.error(f'Subscription collector "{getattr(collector, "name", "?")}" ended; retrying in {backoff}s')
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 60)
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as e:
                 if not self._stop_all.is_set():
+                    self.logger.error(f'Subscription collector "{getattr(collector, "name", "?")}" failed: {e}; retrying in {backoff}s')
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 60)
             finally:

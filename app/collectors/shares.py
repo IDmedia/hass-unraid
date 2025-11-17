@@ -65,20 +65,17 @@ class SharesCollector(QueryCollector):
                         f'Per-share legacy refresh failed for "{share_nameorig}": '
                         f'{type(e).__name__}: {e}'
                     )
-                    # Continue with existing or GraphQL-provided values
-                # No continue; we'll use cached or GraphQL data
 
+            # Use data solely from the legacy cache
             cached = self._legacy_cache.get(share_nameorig)
             if cached is not None and isinstance(cached, tuple) and len(cached) == 2:
                 used_kb, free_kb = cached
             else:
-                # Fallback to GraphQL fields (bytes -> kB) if legacy cache is not available
-                used_kb = int((s.get('used') or 0) / 1000)
-                free_kb = int((s.get('free') or 0) / 1000)
+                self.logger.warning(f"No legacy data available for share '{share_nameorig}', skipping...")
+                continue
 
             size_kb = used_kb + free_kb
             used_pct = int(round((used_kb / size_kb) * 100)) if size_kb > 0 else 0
-
             payload = {
                 'name': f'Share {str(name).title()} Usage',
                 'unit_of_measurement': '%',
