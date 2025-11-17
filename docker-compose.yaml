@@ -4,14 +4,14 @@ services:
     cpuset: '16-27'
     network_mode: bridge
     restart: always
-    # build: ./
+    build: ./
     environment:
       - TZ=Europe/Oslo
     volumes:
       - './data:/data'
     labels:
       - 'kuma.__enable=true'
-      - uptimekuma.keyword=main.py
+      - 'uptimekuma.keyword=app.main'
       - 'net.unraid.docker.webui=http://192.168.1.60:2375/containers/hass-unraid/top'
       - 'net.unraid.docker.icon=/mnt/user/docker/docker-icons/data/hass-unraid.png'
     image: ghcr.io/idmedia/hass-unraid:latest
