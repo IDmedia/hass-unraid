@@ -33,9 +33,6 @@ class Update3Channel(LegacyChannel):
                 continue
 
             port_name = str(entry[0])
-            if not port_name.startswith('eth'):
-                continue
-
             rx_bps = float(entry[3]) if len(entry) > 3 and isinstance(entry[3], (int, float)) else 0.0
             tx_bps = float(entry[4]) if len(entry) > 4 and isinstance(entry[4], (int, float)) else 0.0
 

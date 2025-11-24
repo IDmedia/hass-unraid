@@ -12,15 +12,15 @@ def _resolve_ws_connect():
     Return a websockets connect callable, trying modern and legacy entry points.
     """
     try:
-        from websockets.client import connect as _connect  # type: ignore
+        from websockets.client import connect as _connect
         return _connect
     except Exception:
         try:
-            from websockets.legacy.client import connect as _connect  # type: ignore
+            from websockets.legacy.client import connect as _connect
             return _connect
         except Exception:
             try:
-                from websockets import connect as _connect  # type: ignore
+                from websockets import connect as _connect
                 return _connect
             except Exception:
                 return None
@@ -222,10 +222,12 @@ class LegacyWSRunner:
                         msg_data = raw.replace('\00', ' ').split('\n\n', 1)[1]
                     except Exception:
                         msg_data = raw
+
                     # Update last message timestamp
                     last_msg_ts = asyncio.get_event_loop().time()
                     received_first = True
                     strikes_used = 0  # clear strikes once we get any message
+
                     # Drop any queued older message and keep the latest
                     try:
                         while True:
@@ -244,8 +246,10 @@ class LegacyWSRunner:
                     first = await event_queue.get()
                 except asyncio.CancelledError:
                     return
+
                 await publish_updates(first)
                 event_queue.task_done()
+
                 while not (local_stop.is_set() or stop_event.is_set()):
                     try:
                         await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
@@ -253,13 +257,16 @@ class LegacyWSRunner:
                             break
                     except asyncio.TimeoutError:
                         pass
+
                     latest = None
+
                     try:
                         while True:
                             latest = event_queue.get_nowait()
                             event_queue.task_done()
                     except asyncio.QueueEmpty:
                         pass
+
                     if latest is None:
                         continue
                     await publish_updates(latest)
@@ -285,6 +292,7 @@ class LegacyWSRunner:
                                 'Origin': self.http_base_url,
                                 'Referer': urljoin(self.http_base_url + '/', 'Main'),
                             }
+
                             r = await http.get(urljoin(self.http_base_url + '/', 'Main'), headers=headers)
                             if r.status_code in (401, 403) or _is_login_response(r):
                                 self.logger.info(
@@ -301,6 +309,7 @@ class LegacyWSRunner:
                                 )
                                 headers['Cookie'] = await self.auth.get_cookie(force=True)
                                 await http.get(urljoin(self.http_base_url + '/', 'Dashboard'), headers=headers)
+
                         except Exception as e:
                             self.logger.warning(f'Legacy WS "{channel_name}" keepalive error: {e}')
                         await asyncio.sleep(period)
