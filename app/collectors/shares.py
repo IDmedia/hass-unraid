@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 class SharesCollector(QueryCollector):
     name = 'shares'
     requires_legacy_auth = True
+
     query = """
     query Shares {
       shares {
@@ -36,8 +37,12 @@ class SharesCollector(QueryCollector):
         self.logger = logger
         self.interval = int(interval)
         self.legacy_ctx = legacy_ctx
+
+        # How often to refresh legacy per-share data
         self._legacy_refresh_period = max(self.interval * 10, 60)
         self._per_share_timeout = 30
+
+        # Cache keyed by share_nameorig -> (used_kb, free_kb)
         self._legacy_cache: Dict[str, Tuple[int, int]] = {}
         self._legacy_last_refresh: Dict[str, float] = {}
 
@@ -76,6 +81,7 @@ class SharesCollector(QueryCollector):
 
             size_kb = used_kb + free_kb
             used_pct = int(round((used_kb / size_kb) * 100)) if size_kb > 0 else 0
+
             payload = {
                 'name': f'Share {str(name).title()} Usage',
                 'unit_of_measurement': '%',
@@ -137,7 +143,9 @@ class SharesCollector(QueryCollector):
             return
 
         used_kb_total, free_kb_total = self._parse_share_rows(tree, share_nameorig, floor_kb)
+
         if used_kb_total == 0 and free_kb_total == 0:
+            # Fallback to the main row totals (typical for exclusive cache shares with no sub-rows)
             total_used_text = (
                 next(
                     iter(
@@ -163,40 +171,74 @@ class SharesCollector(QueryCollector):
 
             total_used_bytes = self._parse_size_safe(total_used_text)
             total_free_bytes = self._parse_size_safe(total_free_text)
-            used_kb_total = int(total_used_bytes / 1000)
-            free_kb_total = int(total_free_bytes / 1000)
+
+            used_kb_total = max(int(total_used_bytes / 1000), 0)
+            # Cache-only fallback: subtract floor once
+            free_kb_total = max(int(total_free_bytes / 1000) - floor_kb, 0)
 
         self._legacy_cache[share_nameorig] = (used_kb_total, free_kb_total)
 
     def _parse_share_rows(self, tree: etree._Element, share_nameorig: str, floor_kb: int) -> Tuple[int, int]:
+        """
+        Parse all sub-rows for a given share (those with the per-row 'Recompute...' link).
+        Logic:
+          - Always include all used across all rows.
+          - If any disk rows exist: include free only from disk rows (minus floor per disk); ignore cache/pool free.
+          - If no disk rows exist (cache-only): include free from all rows (minus floor per row).
+          - If there are no sub-rows at all, return (0, 0) to trigger the caller's fallback to the main row totals.
+        """
         used_kb_total = 0
         free_kb_total = 0
 
+        # Match sub-rows by looking for the recompute link for this share
         sub_rows = tree.xpath(
-            f'//tr[td/a[@title="Recompute..." and contains(@onclick, "computeShare(\'{share_nameorig}\'")]]'
+            f'//tr[td/a[@title="Recompute..." and contains(@onclick, "computeShare") and contains(@onclick, "{share_nameorig}")]]'
         )
 
+        rows: List[Dict[str, int]] = []
         for tr in sub_rows:
+            # Column 1 trailing text holds the label, e.g., "Disk 3" or a pool/cache label
             label_texts = tr.xpath('td[1]/text()[last()]')
             label = (label_texts[0] if label_texts else '').strip().lstrip('\u00A0').strip()
             label_lower = label.lower()
 
+            # Used and Free are columns 6 and 7
             size_text = (tr.xpath('td[6]/text()') or ['0'])[0].strip()
             free_text = (tr.xpath('td[7]/text()') or ['0'])[0].strip()
 
             size_bytes = self._parse_size_safe(size_text)
             free_bytes = self._parse_size_safe(free_text)
 
-            size_kb = int(size_bytes / 1000)
-            free_kb = int(free_bytes / 1000)
+            size_kb = max(int(size_bytes / 1000), 0)
+            free_kb = max(int(free_bytes / 1000), 0)
 
-            used_kb_total += max(size_kb, 0)
+            rows.append({
+                'is_disk': label_lower.startswith('disk '),
+                'used_kb': size_kb,
+                'free_kb': free_kb,
+            })
 
-            is_disk_row = label_lower.startswith('disk ')
-            if is_disk_row:
-                adjusted_free_kb = max(free_kb - floor_kb, 0)
+        # No sub-rows
+        if not rows:
+            return 0, 0
 
-            free_kb_total += max(adjusted_free_kb, 0)
+        # Always include all used (disk + cache/pool)
+        used_kb_total = sum(r['used_kb'] for r in rows)
+
+        has_disk = any(r['is_disk'] for r in rows)
+        if has_disk:
+            # Mixed share
+            free_kb_total = 0
+            for r in rows:
+                if r['is_disk']:
+                    adjusted_free_kb = max(r['free_kb'] - floor_kb, 0)
+                    free_kb_total += adjusted_free_kb
+        else:
+            # Cache-only
+            free_kb_total = 0
+            for r in rows:
+                adjusted_free_kb = max(r['free_kb'] - floor_kb, 0)
+                free_kb_total += adjusted_free_kb
 
         return used_kb_total, free_kb_total
 
