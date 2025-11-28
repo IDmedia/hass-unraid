@@ -195,8 +195,6 @@ class SharesCollector(QueryCollector):
             is_disk_row = label_lower.startswith('disk ')
             if is_disk_row:
                 adjusted_free_kb = max(free_kb - floor_kb, 0)
-            else:
-                adjusted_free_kb = free_kb
 
             free_kb_total += max(adjusted_free_kb, 0)
 
