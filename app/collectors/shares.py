@@ -233,6 +233,9 @@ class SharesCollector(QueryCollector):
                 if r['is_disk']:
                     adjusted_free_kb = max(r['free_kb'] - floor_kb, 0)
                     free_kb_total += adjusted_free_kb
+                else:
+                    # Subtract used space on cache
+                    free_kb_total -= r['used_kb']
         else:
             # Cache-only
             free_kb_total = 0
