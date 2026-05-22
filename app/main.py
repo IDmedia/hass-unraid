@@ -756,7 +756,19 @@ async def main() -> None:
         pass
 
     await stop_event.wait()
-    # Integrations stop via task cancellation on container stop.
+
+    for i in integrators:
+        i._stop_all.set()
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                *(i._stop_runtime() for i in integrators if i._started),
+                return_exceptions=True,
+            ),
+            timeout=35,
+        )
+    except asyncio.TimeoutError:
+        pass
 
 
 if __name__ == '__main__':

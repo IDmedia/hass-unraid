@@ -39,12 +39,15 @@ class SharesCollector(QueryCollector):
         self.legacy_ctx = legacy_ctx
 
         # How often to refresh legacy per-share data
-        self._legacy_refresh_period = max(self.interval * 10, 60)
+        self._legacy_refresh_period = max(self.interval * 20, 300)
         self._per_share_timeout = 30
 
         # Cache keyed by share_nameorig -> (used_kb, free_kb)
         self._legacy_cache: Dict[str, Tuple[int, int]] = {}
         self._legacy_last_refresh: Dict[str, float] = {}
+
+        # Shares not yet populated once
+        self._pending_first_refresh: set = set()
 
     async def fetch(self) -> Dict:
         return await self.gql.query(self.query)
@@ -60,6 +63,13 @@ class SharesCollector(QueryCollector):
                 continue
 
             now = time.time()
+            if share_nameorig not in self._legacy_last_refresh:
+                # Stagger initial refresh over a short window; ongoing refreshes spread over full period
+                slot = len(self._legacy_last_refresh)
+                init_window = min(self._legacy_refresh_period, 120)
+                stagger = (slot * init_window) / max(len(shares), 1)
+                self._legacy_last_refresh[share_nameorig] = now - self._legacy_refresh_period + stagger
+                self._pending_first_refresh.add(share_nameorig)
             if self.legacy_ctx and (now - self._legacy_last_refresh.get(share_nameorig, 0.0) >= self._legacy_refresh_period):
                 try:
                     floor_kb = self._to_int_safe(s.get('floor'))
@@ -74,9 +84,11 @@ class SharesCollector(QueryCollector):
             # Use data solely from the legacy cache
             cached = self._legacy_cache.get(share_nameorig)
             if cached is not None and isinstance(cached, tuple) and len(cached) == 2:
+                self._pending_first_refresh.discard(share_nameorig)
                 used_kb, free_kb = cached
             else:
-                self.logger.warning(f"No legacy data available for share '{share_nameorig}', skipping...")
+                if share_nameorig not in self._pending_first_refresh:
+                    self.logger.warning(f"No legacy data available for share '{share_nameorig}', skipping...")
                 continue
 
             size_kb = used_kb + free_kb
