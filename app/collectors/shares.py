@@ -45,9 +45,7 @@ class SharesCollector(QueryCollector):
         # Cache keyed by share_nameorig -> (used_kb, free_kb)
         self._legacy_cache: Dict[str, Tuple[int, int]] = {}
         self._legacy_last_refresh: Dict[str, float] = {}
-
-        # Shares not yet populated once
-        self._pending_first_refresh: set = set()
+        self._pending_first_refresh: set = set()  # shares not yet populated once
 
     async def fetch(self) -> Dict:
         return await self.gql.query(self.query)

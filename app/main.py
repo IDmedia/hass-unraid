@@ -274,6 +274,7 @@ class UnraidGraphQLIntegration:
         self.scan_interval = int(unraid_cfg.get('scan_interval', 30))
         self.api_key = api_key
         self.verify_ssl = verify_ssl
+        self._disabled_collectors: set = set(unraid_cfg.get('disabled_collectors') or [])
 
         self.logger.info(f'SSL mode: {"https/wss" if use_ssl else "http/ws"}, verify_ssl={self.verify_ssl}')
 
@@ -329,6 +330,9 @@ class UnraidGraphQLIntegration:
                 collector_cls = getattr(mod, 'COLLECTOR', None)
                 if collector_cls is None:
                     continue
+                if getattr(collector_cls, 'name', None) in self._disabled_collectors:
+                    self.logger.info(f'Skipping disabled collector: {getattr(collector_cls, "name", module_name)}')
+                    continue
 
                 requires_legacy = getattr(collector_cls, 'requires_legacy_auth', False)
                 uses_smart = getattr(collector_cls, 'uses_smart_cache', False)
@@ -367,6 +371,9 @@ class UnraidGraphQLIntegration:
                 subs_cls = getattr(mod, 'SUBSCRIPTION', None)
                 if subs_cls is None:
                     continue
+                if getattr(subs_cls, 'name', None) in self._disabled_collectors:
+                    self.logger.info(f'Skipping disabled collector: {getattr(subs_cls, "name", module_name)}')
+                    continue
 
                 instance = subs_cls(self.logger, self.scan_interval)
                 self.subscription_collectors.append(instance)
@@ -399,6 +406,9 @@ class UnraidGraphQLIntegration:
                 mod = importlib.import_module(full_module)
                 channel_cls = getattr(mod, 'CHANNEL', None)
                 if channel_cls is None:
+                    continue
+                if getattr(channel_cls, 'name', None) in self._disabled_collectors:
+                    self.logger.info(f'Skipping disabled collector: {getattr(channel_cls, "name", module_name)}')
                     continue
 
                 instance = channel_cls(self.logger, self.scan_interval)

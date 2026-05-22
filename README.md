@@ -74,6 +74,13 @@ unraid:
     api_key: VIEWER_ROLE_API_KEY
     scan_interval: 30
 
+    # Note: Advanced users and debugging only
+    # Disable certain collectors
+    # Available: disks, shares, gpu_plugin, smart_data, cpu, apcups, parity, temperature, update1, update3, dashboard_ping
+    # disabled_collectors:
+    #   - shares
+    #   - gpu_plugin
+
   - name: Hisa
     host: 192.168.1.20
     port: 80
@@ -126,6 +133,8 @@ services:
 - On Unraid 7.2.0+, you can use `:latest` or pin a specific `2.x.x` tag.
 - On first run, a device should appear in Home Assistant under Settings → Devices & Services → MQTT.  
   If nothing shows up, check the container logs: `docker logs hass-unraid`.
+- **Advanced:** You can disable individual data collectors per server using `disabled_collectors` in your `config.yaml`. This is intended for advanced users and debugging. See the config example above for available collector names.
+
 
 ## Updating
 

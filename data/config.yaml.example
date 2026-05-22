@@ -8,6 +8,13 @@ unraid:
     api_key: VIEWER_ROLE_API_KEY
     scan_interval: 30
 
+    # Note: Advanced users and debugging only
+    # Disable certain collectors
+    # Available: disks, shares, gpu_plugin, smart_data, cpu, apcups, parity, temperature, update1, update3, dashboard_ping
+    # disabled_collectors:
+    #   - shares
+    #   - gpu_plugin
+
   - name: Hisa
     host: 192.168.1.20
     port: 80
