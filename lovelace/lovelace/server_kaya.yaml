@@ -83,15 +83,11 @@ cards:
             }
       content: |
         <ha-alert alert-type="warning">
-          <strong>Parity-Check {% if 'paused' in state_attr("sensor.kaya_parity_check", "elapsed_time") | lower %}paused{% else %}in progress{% endif %}</strong><br />
+          <strong>Parity-Check in progress</strong><br />
           Current position: {{ state_attr("sensor.kaya_parity_check", "current_position") | int(0) | filesizeformat() }}
                             ({{ states("sensor.kaya_parity_check") | float(0)}} %) @ 
                             {{ state_attr("sensor.kaya_parity_check", "estimated_speed") | int(0) | filesizeformat() }}/sec<br />
-          {%- if 'paused' in state_attr("sensor.kaya_parity_check", "elapsed_time") | lower %}
-          Elapsed time: {{ state_attr("sensor.kaya_parity_check", "elapsed_time") }}
-          {%- else %}
           Estimated finish: {{ state_attr("sensor.kaya_parity_check", "estimated_finish") }}
-          {%- endif %}
         </ha-alert>
     filter:
       template: |
@@ -133,7 +129,6 @@ cards:
             'sensor.kaya_disk_18',
             'sensor.kaya_disk_19',
             'sensor.kaya_disk_20',
-            'sensor.kaya_empty_slot'
           ] 
         %}
 
@@ -218,7 +213,7 @@ cards:
             'entity': disk.entity_id,
             'template': 'button_unraid_disk',
             'variables': {
-              'connectivity_entity': 'sensor.kaya_cpu_utilization'
+              'connectivity_entity': 'binary_sensor.kaya_connectivity'
             },
             'card_mod': {
               'style': 'ha-card { margin-top: 15px; }'
@@ -251,9 +246,9 @@ cards:
         card_param: cards
         filter:
           template: >-
-            {% set share_list = states.sensor
-               | selectattr('entity_id','search', 'kaya_share')
-               | rejectattr('attributes.nameorig', 'in', ['appdata', 'backup', 'system', 'vms'])
+            {% set share_ids = device_entities(device_id('binary_sensor.kaya_connectivity')) | select('search', 'kaya_share') | list %}
+            {% set share_list = expand(share_ids)
+               | rejectattr('attributes.nameorig', 'in', ['appdata', 'system', 'vms'])
                | sort(reverse=true,attribute='state')
                | map(attribute='entity_id')
                | list

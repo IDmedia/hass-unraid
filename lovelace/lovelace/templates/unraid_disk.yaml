@@ -155,20 +155,25 @@ button_unraid_disk:
 
         const normalize = v => String(v).trim().toLowerCase();
 
-        const diskShares = Object.entries(states)
-          .filter(([k]) => k.includes(`${serverName}_share`))
-          .filter(([k, v]) => v?.attributes && v.attributes.include !== undefined)
-          .filter(([k, v]) => {
-            const inc = v.attributes.include;
-            // Normalize include to an array of strings
-            const list = Array.isArray(inc)
-              ? inc
-              : (typeof inc === 'string' ? inc.split(',') : []);
-            const normList = list.map(normalize);
-            return normList.includes(normalize(diskId));
-          })
-          .map(([k, v]) => v.attributes.nameorig);
+        const cache = (window.__unraidShares ??= {});
+        if (cache.states !== states) { cache.states = states; cache.maps = {}; }
 
+        let map = cache.maps[serverName];
+        if (!map) {
+          map = cache.maps[serverName] = {};
+          const prefix = `sensor.${serverName}_share`;
+          for (const k in states) {
+            if (!k.startsWith(prefix)) continue;
+            const a = states[k]?.attributes;
+            if (!a || a.include === undefined) continue;
+            const list = Array.isArray(a.include)
+              ? a.include
+              : (typeof a.include === 'string' ? a.include.split(',') : []);
+            for (const d of new Set(list.map(normalize))) (map[d] ??= []).push(a.nameorig);
+          }
+        }
+
+        const diskShares = map[normalize(diskId)] || [];
         return (diskShares.length > 0) ? diskShares.join(', ') : '&nbsp;';
       ]]]
     used: >
