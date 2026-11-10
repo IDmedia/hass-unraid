@@ -144,7 +144,7 @@ cards:
             'entity': disk.entity_id,
             'template': 'button_unraid_disk',
             'variables': {
-              'connectivity_entity': 'sensor.kaya_cpu_utilization'
+              'connectivity_entity': 'binary_sensor.kaya_connectivity'
             },
             'name': disk.attributes.friendly_name | replace("Kaya", "") | replace("Disk Parity", "Parity") | replace("Disk Cache Array", "Cache")
           }
@@ -177,7 +177,7 @@ cards:
             'entity': disk.entity_id,
             'template': 'button_unraid_disk',
             'variables': {
-              'connectivity_entity': 'sensor.kaya_cpu_utilization'
+              'connectivity_entity': 'binary_sensor.kaya_connectivity'
             },
             'card_mod': {
               'style': 'ha-card { margin-top: 15px; }'
