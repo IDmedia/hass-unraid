@@ -91,9 +91,12 @@ cards:
         </ha-alert>
     filter:
       template: |
-        {% set parity_status = states("sensor.kaya_parity_check") | float(default=-1) %}
-        {% if parity_status >= 0 and parity_status < 100 %}
-          sensor.kaya_parity_check,
+        {% set e = 'sensor.kaya_parity_check' %}
+        {% if has_value(e) and is_number(states(e)) %}
+          {% set p = states(e) | float %}
+          {% if 0.1 < p < 100 %}
+            sensor.kaya_parity_check
+          {% endif %}
         {% endif %}
 
   - type: custom:auto-entities
