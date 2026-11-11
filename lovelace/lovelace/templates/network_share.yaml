@@ -8,7 +8,7 @@ button_network_share:
     bar_color_normal: '#69B34C'
     bar_color_warning: '#FAB733'
     bar_color_critical: '#FF4E11'
-    bar_color_background: '#E5E6E8'
+    bar_color_background: var(--divider-color)
   show_icon: false
   show_entity_picture: true
   entity_picture: /local/images/share.png
@@ -28,7 +28,7 @@ button_network_share:
       - column-gap: 5px
       - grid-template-rows: 1fr
     card:
-      - color: '#000'
+      - color: var(--primary-text-color)
       - font-size: 1em
       - border-style: none
       - --mdc-ripple-color: none
@@ -47,7 +47,7 @@ button_network_share:
       state:
         - grid-area: state
         - justify-self: start
-        - color: '#888'
+        - color: var(--secondary-text-color)
         - font-size: 0.8em
   custom_fields:
     state: >

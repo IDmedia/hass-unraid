@@ -9,15 +9,16 @@ button_simple_bar:
     critical_from_state: 80
     bar_height: '10px'
     state_font_size: '1em'
-    bar_color_text: '#000'
+    bar_color_text: var(--primary-text-color)
     bar_color_normal: '#69B34C'
     bar_color_warning: '#FAB733'
     bar_color_critical: '#FF4E11'
-    bar_color_background: '#E5E6E8'
+    bar_color_background: var(--divider-color)
     reversed: false
     state_position: outside  # Use 'inside' or 'outside'
     bar_image: null
     bar_image_size: '40px'
+    bar_image_background: transparent
   state_display: >
     [[[
       return (entity && !isNaN(entity.state))
@@ -30,7 +31,7 @@ button_simple_bar:
       - grid-template-columns: auto auto 1fr auto
       - grid-template-rows: auto
     card:
-      - color: '#000'
+      - color: var(--primary-text-color)
       - font-size: 1em
       - margin: 5px 0
       - padding: 0
@@ -47,7 +48,7 @@ button_simple_bar:
     img: >
       [[[
         if (variables.bar_image) {
-          return `<img src="${variables.bar_image}" style="width: ${variables.bar_image_size}; height: ${variables.bar_image_size}; object-fit: contain; margin-right: 13px; border-radius: 50%;">`;
+          return `<img src="${variables.bar_image}" style="width: ${variables.bar_image_size}; height: ${variables.bar_image_size}; object-fit: contain; margin-right: 13px; border-radius: 50%; background: ${variables.bar_image_background};">`;
         }
         return '';
       ]]]
@@ -62,9 +63,9 @@ button_simple_bar:
         let barColor = variables.bar_color_normal;
         if (variables.reversed) {
           // Reversed thresholds (e.g., for battery meters)
-          if (pctUsed < variables.warning_from_state) {
+          if (pctUsed < variables.critical_from_state) {
             barColor = variables.bar_color_critical;
-          } else if (pctUsed < variables.critical_from_state) {
+          } else if (pctUsed < variables.warning_from_state) {
             barColor = variables.bar_color_warning;
           }
         } else {
