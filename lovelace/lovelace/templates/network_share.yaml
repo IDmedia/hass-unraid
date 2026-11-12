@@ -32,6 +32,7 @@ button_network_share:
       - font-size: 1em
       - border-style: none
       - --mdc-ripple-color: none
+      - padding: 5px 0
     icon:
       - width: 100%
     img_cell:
