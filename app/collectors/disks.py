@@ -11,107 +11,18 @@ class DisksCollector(QueryCollector):
     query = """
     query Array {
       array {
-        disks {
-          idx
-          name
-          device
-          size
-          status
-          rotational
-          temp
-          numReads
-          numWrites
-          numErrors
-          fsSize
-          fsFree
-          fsUsed
-          exportable
-          type
-          warning
-          critical
-          fsType
-          comment
-          format
-          transport
-          color
-          isSpinning
-        }
-        caches {
-          idx
-          name
-          device
-          size
-          status
-          rotational
-          temp
-          numReads
-          numWrites
-          numErrors
-          fsSize
-          fsFree
-          fsUsed
-          exportable
-          type
-          warning
-          critical
-          fsType
-          comment
-          format
-          transport
-          color
-          isSpinning
-        }
-        boot {
-          idx
-          name
-          device
-          size
-          status
-          rotational
-          temp
-          numReads
-          numWrites
-          numErrors
-          fsSize
-          fsFree
-          fsUsed
-          exportable
-          type
-          warning
-          critical
-          fsType
-          comment
-          format
-          transport
-          color
-          isSpinning
-        }
-        parities {
-          idx
-          name
-          device
-          size
-          status
-          rotational
-          temp
-          numReads
-          numWrites
-          numErrors
-          fsSize
-          fsFree
-          fsUsed
-          exportable
-          type
-          warning
-          critical
-          fsType
-          comment
-          format
-          transport
-          color
-          isSpinning
-        }
+        disks { ...DiskFields }
+        caches { ...DiskFields }
+        boot { ...DiskFields }
+        parities { ...DiskFields }
       }
+    }
+
+    fragment DiskFields on ArrayDisk {
+      idx name device size status rotational
+      temp numReads numWrites numErrors fsSize fsFree
+      fsUsed exportable type warning critical fsType
+      comment format transport color isSpinning
     }
     """
 
@@ -170,7 +81,7 @@ class DisksCollector(QueryCollector):
                     state=temp_value,
                     attributes=attrs,
                     retain=True,
-                    unique_id_suffix=d.get('id') or d.get('name'),
+                    unique_id_suffix=d.get('name'),
                 )
             )
 

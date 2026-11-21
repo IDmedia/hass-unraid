@@ -4,8 +4,9 @@ import ssl as ssl_mod
 from hashlib import sha256
 from urllib.parse import urljoin
 from http.cookies import SimpleCookie
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, List, Optional, Tuple
 from app.collectors.base import IncompleteData
+from app.utils import publish_latest, put_latest
 
 
 def _resolve_ws_connect():
@@ -116,6 +117,7 @@ class LegacyWSRunner:
         self.logger = logger
         # Limit concurrent prime+connect steps to avoid a thundering herd at startup
         self._connect_sem = asyncio.Semaphore(2)
+        self._keepalive_task: Optional[asyncio.Task] = None
 
     async def _connect_ws_compat(self, url: str, subprotocols: List[str], headers: dict, ssl_ctx):
         if _WS_CONNECT is None:
@@ -127,10 +129,56 @@ class LegacyWSRunner:
         except TypeError:
             return _WS_CONNECT(url, subprotocols=subprotocols, headers=hdrs_list, ssl=ssl_ctx)
 
+    def _http(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(verify=self.verify_ssl, timeout=10, follow_redirects=True, trust_env=False)
+
+    async def _touch_gui(self, http: httpx.AsyncClient, context: str) -> None:
+        """
+        GET /Main and /Dashboard so Unraid keeps its Nchan producers running.
+        Re-login only when the server serves a login page or 401/403.
+        """
+        for page in ('Main', 'Dashboard'):
+            url = urljoin(self.http_base_url + '/', page)
+            headers = {'Cookie': await self.auth.get_cookie(), 'Origin': self.http_base_url, 'Referer': url}
+            r = await http.get(url, headers=headers)
+            if r.status_code in (401, 403) or _is_login_response(r):
+                self.logger.info(f'Legacy WS {context}: auth expired on /{page}, refreshing cookie')
+                headers['Cookie'] = await self.auth.get_cookie(force=True)
+                await http.get(url, headers=headers)
+
+    async def prime(self, context: str) -> None:
+        """Touch the GUI once; used at connect and as a re-kicker when a channel goes silent."""
+        try:
+            async with self._http() as http:
+                await self._touch_gui(http, context)
+            self.logger.debug(f'Legacy WS {context}: primed /Main and /Dashboard')
+        except Exception as e:
+            self.logger.warning(f'Legacy WS {context}: prime failed: {e}')
+
+    def start_keepalive(self, interval_seconds: int) -> None:
+        """A single GUI keepalive per server keeps the producers alive for every channel."""
+        if self._keepalive_task is None:
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop(max(15, int(interval_seconds))))
+
+    async def _keepalive_loop(self, period: int) -> None:
+        async with self._http() as http:
+            while True:
+                await asyncio.sleep(period)
+                try:
+                    await self._touch_gui(http, 'keepalive')
+                except Exception as e:
+                    self.logger.warning(f'Legacy WS keepalive error: {e}')
+
+    async def aclose(self) -> None:
+        if self._keepalive_task:
+            self._keepalive_task.cancel()
+            await asyncio.gather(self._keepalive_task, return_exceptions=True)
+            self._keepalive_task = None
+
     async def run_channel(
         self,
         channel_name: str,
-        parse_fn: Callable[[str], asyncio.Future],
+        parse_fn: Callable[[str], Awaitable[Any]],
         handle_updates: Callable,
         interval_seconds: int,
         stop_event: asyncio.Event,
@@ -141,8 +189,7 @@ class LegacyWSRunner:
         """
         Run a single Nchan WS channel with:
           - Cookie refresh and re-prime on auth loss (login page or 401/403)
-          - WS ping keepalive
-          - GUI keepalive to keep producers alive
+          - WS ping keepalive (built into the websockets client, every 20s)
           - Inactivity detection (optional): if no messages for N seconds, re-prime and eventually reconnect
 
         Set inactivity_timeout <= 0 to disable inactivity restarts for sparse channels.
@@ -151,33 +198,28 @@ class LegacyWSRunner:
         """
         backoff = 5
         inactivity_strikes = max(1, int(inactivity_strikes))
+        context = f'"{channel_name}"'
+        effective_inactivity = (
+            inactivity_timeout if inactivity_timeout is not None else int(max(240, 6 * interval_seconds))
+        )
+        inactivity_disabled = effective_inactivity <= 0
+        grace = int(first_message_grace) if first_message_grace is not None else int(max(180, 2 * effective_inactivity))
+
+        async def publish_updates(msg_data: str):
+            try:
+                updates = await parse_fn(msg_data) or []
+                handle_updates(updates)
+            except IncompleteData as e:
+                self.logger.debug(f'Legacy WS {context} message skipped: {e}')
+            except Exception as e:
+                self.logger.error(f'Legacy WS {context} publish failed: {e}')
+
         while not stop_event.is_set():
             local_stop = asyncio.Event()
             event_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
-
-            # Inactivity thresholds
-            effective_inactivity = (
-                inactivity_timeout if inactivity_timeout is not None else int(max(240, 6 * interval_seconds))
-            )
-            inactivity_disabled = (effective_inactivity is not None and effective_inactivity <= 0)
-            grace = (
-                int(first_message_grace)
-                if first_message_grace is not None
-                else int(max(180, 2 * effective_inactivity))
-            )
-
             last_msg_ts = asyncio.get_event_loop().time()
             received_first = False
             strikes_used = 0
-
-            async def publish_updates(msg_data: str):
-                try:
-                    updates = await parse_fn(msg_data) or []
-                    handle_updates(updates)
-                except IncompleteData as e:
-                    self.logger.debug(f'Legacy WS "{channel_name}" message skipped: {e}')
-                except Exception as e:
-                    self.logger.error(f'Legacy WS "{channel_name}" publish failed: {e}')
 
             async def receiver_loop(ws):
                 nonlocal last_msg_ts, received_first, strikes_used
@@ -192,204 +234,55 @@ class LegacyWSRunner:
                         if (now - last_msg_ts) >= threshold:
                             strikes_used += 1
                             if strikes_used < inactivity_strikes:
-                                # Try re-priming instead of immediate reconnect
                                 self.logger.warning(
-                                    f'Legacy WS "{channel_name}" inactivity window {strikes_used}/{inactivity_strikes}: '
+                                    f'Legacy WS {context} inactivity window {strikes_used}/{inactivity_strikes}: '
                                     f'no messages for {int(now - last_msg_ts)}s (>= {threshold}s); re-priming GUI'
                                 )
-                                await prime_stream()
-                                # Give producers a little time and reset the timer baseline
+                                await self.prime(context)
                                 last_msg_ts = asyncio.get_event_loop().time()
                                 continue
-                            else:
-                                self.logger.warning(
-                                    f'Legacy WS "{channel_name}" inactivity: no messages for {int(now - last_msg_ts)}s '
-                                    f'(>= {threshold}s) after {strikes_used} window(s); reconnecting'
-                                )
-                                break
+                            self.logger.warning(
+                                f'Legacy WS {context} inactivity: no messages for {int(now - last_msg_ts)}s '
+                                f'(>= {threshold}s) after {strikes_used} window(s); reconnecting'
+                            )
+                            break
                         continue
                     except Exception as e:
-                        self.logger.error(f'Legacy WS "{channel_name}" recv error: {e}')
+                        self.logger.error(f'Legacy WS {context} recv error: {e}')
                         break
                     try:
                         msg_data = raw.replace('\00', ' ').split('\n\n', 1)[1]
                     except Exception:
                         msg_data = raw
 
-                    # Update last message timestamp
                     last_msg_ts = asyncio.get_event_loop().time()
                     received_first = True
-                    strikes_used = 0  # clear strikes once we get any message
-
-                    # Drop any queued older message and keep the latest
-                    try:
-                        while True:
-                            event_queue.get_nowait()
-                            event_queue.task_done()
-                    except asyncio.QueueEmpty:
-                        pass
-                    await event_queue.put(msg_data)
-
-            async def publisher_loop():
-                try:
-                    while event_queue.empty() and not (local_stop.is_set() or stop_event.is_set()):
-                        await asyncio.sleep(0.05)
-                    if local_stop.is_set() or stop_event.is_set():
-                        return
-                    first = await event_queue.get()
-                except asyncio.CancelledError:
-                    return
-
-                await publish_updates(first)
-                event_queue.task_done()
-
-                while not (local_stop.is_set() or stop_event.is_set()):
-                    try:
-                        await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
-                        if stop_event.is_set():
-                            break
-                    except asyncio.TimeoutError:
-                        pass
-
-                    latest = None
-
-                    try:
-                        while True:
-                            latest = event_queue.get_nowait()
-                            event_queue.task_done()
-                    except asyncio.QueueEmpty:
-                        pass
-
-                    if latest is None:
-                        continue
-                    await publish_updates(latest)
-
-            async def keepalive_loop():
-                """
-                Periodically GET /Main and /Dashboard to keep Nchan producers active.
-                Triggers re-login only if the server serves a login page or 401/403.
-                Does NOT force reconnects on cookie change to avoid herd thrash.
-                """
-                period = max(15, int(interval_seconds))
-                async with httpx.AsyncClient(
-                    verify=self.verify_ssl,
-                    timeout=10,
-                    follow_redirects=True,
-                    trust_env=False,
-                ) as http:
-                    while not (local_stop.is_set() or stop_event.is_set()):
-                        try:
-                            cookie = await self.auth.get_cookie()
-                            headers = {
-                                'Cookie': cookie,
-                                'Origin': self.http_base_url,
-                                'Referer': urljoin(self.http_base_url + '/', 'Main'),
-                            }
-
-                            r = await http.get(urljoin(self.http_base_url + '/', 'Main'), headers=headers)
-                            if r.status_code in (401, 403) or _is_login_response(r):
-                                self.logger.info(
-                                    f'Legacy WS "{channel_name}" keepalive: auth expired on /Main, refreshing cookie'
-                                )
-                                headers['Cookie'] = await self.auth.get_cookie(force=True)
-                                r = await http.get(urljoin(self.http_base_url + '/', 'Main'), headers=headers)
-
-                            headers['Referer'] = urljoin(self.http_base_url + '/', 'Dashboard')
-                            r = await http.get(urljoin(self.http_base_url + '/', 'Dashboard'), headers=headers)
-                            if r.status_code in (401, 403) or _is_login_response(r):
-                                self.logger.info(
-                                    f'Legacy WS "{channel_name}" keepalive: auth expired on /Dashboard, refreshing cookie'
-                                )
-                                headers['Cookie'] = await self.auth.get_cookie(force=True)
-                                await http.get(urljoin(self.http_base_url + '/', 'Dashboard'), headers=headers)
-
-                        except Exception as e:
-                            self.logger.warning(f'Legacy WS "{channel_name}" keepalive error: {e}')
-                        await asyncio.sleep(period)
-
-            async def ws_pinger_loop(ws):
-                """
-                Send WebSocket ping control frames to keep the WS itself from idling.
-                """
-                period = max(20, int(interval_seconds))
-                while not (local_stop.is_set() or stop_event.is_set()):
-                    try:
-                        await ws.ping()
-                    except Exception as e:
-                        self.logger.debug(f'Legacy WS "{channel_name}" ping failed: {e}')
-                        break
-                    await asyncio.sleep(period)
-
-            async def prime_stream():
-                """
-                Prime /Main and /Dashboard once. Used at connect and as a re-kicker if silent.
-                """
-                try:
-                    async with httpx.AsyncClient(
-                        verify=self.verify_ssl,
-                        timeout=10,
-                        follow_redirects=True,
-                        trust_env=False,
-                    ) as http:
-                        headers = {
-                            'Cookie': await self.auth.get_cookie(),
-                            'Origin': self.http_base_url,
-                            'Referer': urljoin(self.http_base_url + '/', 'Main'),
-                        }
-                        r = await http.get(urljoin(self.http_base_url + '/', 'Main'), headers=headers)
-                        if r.status_code in (401, 403) or _is_login_response(r):
-                            self.logger.info(
-                                f'Legacy WS "{channel_name}" prime: auth expired on /Main, refreshing cookie'
-                            )
-                            headers['Cookie'] = await self.auth.get_cookie(force=True)
-                            r = await http.get(urljoin(self.http_base_url + '/', 'Main'), headers=headers)
-
-                        headers['Referer'] = urljoin(self.http_base_url + '/', 'Dashboard')
-                        r = await http.get(urljoin(self.http_base_url + '/', 'Dashboard'), headers=headers)
-                        if r.status_code in (401, 403) or _is_login_response(r):
-                            self.logger.info(
-                                f'Legacy WS "{channel_name}" prime: auth expired on /Dashboard, refreshing cookie'
-                            )
-                            headers['Cookie'] = await self.auth.get_cookie(force=True)
-                            await http.get(urljoin(self.http_base_url + '/', 'Dashboard'), headers=headers)
-                    self.logger.debug(f'Legacy WS "{channel_name}" primed: /Main and /Dashboard')
-                except Exception as e:
-                    self.logger.warning(f'Legacy WS "{channel_name}" prime failed: {e}')
+                    strikes_used = 0
+                    put_latest(event_queue, msg_data)
 
             async def post_connect_kicker():
-                """
-                While waiting for the first message, give producers a nudge once or twice.
-                """
-                attempts = 0
-                while not received_first and not (local_stop.is_set() or stop_event.is_set()):
-                    attempts += 1
-                    # Space the nudges; do fewer at longer gaps to reduce load
-                    delay = 15 if attempts == 1 else 30
+                """While waiting for the first message, give producers a nudge once or twice."""
+                for delay in (15, 30):
                     await asyncio.sleep(delay)
                     if received_first or local_stop.is_set() or stop_event.is_set():
-                        break
-                    self.logger.debug(f'Legacy WS "{channel_name}" first-message kicker attempt {attempts}')
-                    await prime_stream()
-                    if attempts >= 2:
-                        break
+                        return
+                    self.logger.debug(f'Legacy WS {context} first-message kicker')
+                    await self.prime(context)
 
             try:
                 # Limit concurrent prime+connect across channels
                 async with self._connect_sem:
-                    await prime_stream()
+                    await self.prime(context)
 
                     # Give producers a brief moment to spin up before opening WS
                     await asyncio.sleep(5.0)
 
-                    cookie = await self.auth.get_cookie()
                     headers = {
-                        'Cookie': cookie,
+                        'Cookie': await self.auth.get_cookie(),
                         'Origin': self.http_base_url,
                         'Referer': urljoin(self.http_base_url + '/', 'Dashboard'),
                     }
-                    subprotocols = ['ws+meta.nchan']
                     ssl_ctx = None
-
                     if self.base_ws_url.startswith('wss') and not self.verify_ssl:
                         ssl_ctx = ssl_mod._create_unverified_context()
 
@@ -400,37 +293,34 @@ class LegacyWSRunner:
                         )
                     else:
                         self.logger.info(
-                            f'Legacy WS opening channel: {channel_name} (inactivity_timeout={effective_inactivity}s, grace={grace}s, strikes={inactivity_strikes})'
+                            f'Legacy WS opening channel: {channel_name} (inactivity_timeout={effective_inactivity}s, '
+                            f'grace={grace}s, strikes={inactivity_strikes})'
                         )
-                    connect_cm = await self._connect_ws_compat(url, subprotocols, headers, ssl_ctx)
+                    connect_cm = await self._connect_ws_compat(url, ['ws+meta.nchan'], headers, ssl_ctx)
 
                 # Outside the semaphore to allow others to progress while we process
                 async with connect_cm as ws:
-                    recv_task = asyncio.create_task(receiver_loop(ws))
-                    pub_task = asyncio.create_task(publisher_loop())
-                    ka_task = asyncio.create_task(keepalive_loop())
-                    ws_ping_task = asyncio.create_task(ws_pinger_loop(ws))
-                    kicker_task = asyncio.create_task(post_connect_kicker())
-
-                    await recv_task
-                    local_stop.set()
-
-                    for t in (pub_task, ka_task, ws_ping_task, kicker_task):
-                        try:
-                            await asyncio.wait_for(t, timeout=2)
-                        except asyncio.TimeoutError:
+                    helpers = [
+                        asyncio.create_task(publish_latest(event_queue, publish_updates, interval_seconds, stop_event)),
+                        asyncio.create_task(post_connect_kicker()),
+                    ]
+                    try:
+                        await receiver_loop(ws)
+                    finally:
+                        local_stop.set()
+                        for t in helpers:
                             t.cancel()
+                        await asyncio.gather(*helpers, return_exceptions=True)
 
                 if not stop_event.is_set():
                     # Do not invalidate the cookie here; only re-login when auth actually fails.
-                    # Backoff to avoid tight reconnect loops.
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 60)
                     self.logger.warning(f'Legacy WS channel ended: {channel_name}, reconnecting...')
             except Exception as e:
                 if not stop_event.is_set():
                     # Do not blindly invalidate; LegacyAuth handles re-login on demand.
-                    self.logger.error(f'Legacy WS channel "{channel_name}" failed: {e}')
+                    self.logger.error(f'Legacy WS channel {context} failed: {e}')
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 60)
             finally:

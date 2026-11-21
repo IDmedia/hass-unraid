@@ -8,7 +8,7 @@ import importlib
 import ssl as ssl_mod
 from hashlib import sha256
 from urllib.parse import urljoin
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .entity_tracker import EntityTracker
 from .gql_http import GraphQLClient
@@ -16,7 +16,7 @@ from .legacy.base import LegacyChannel
 from .legacy_ws import LegacyAuth, LegacyWSRunner
 from .mqtt_pub import MQTTPublisher
 from .smart_cache import SmartCache
-from .utils import load_file, normalize_str, setup_logger
+from .utils import load_file, normalize_str, publish_latest, put_latest, setup_logger
 
 try:
     from gql import Client, gql  # type: ignore
@@ -41,12 +41,10 @@ class LegacyHTTPContext:
       - Supports a light CSRF refresh schedule without re-login
     """
 
-    def __init__(self, http_base_url: str, verify_ssl: bool, auth: LegacyAuth, gql: GraphQLClient, smart_cache=None, logger=None):
+    def __init__(self, http_base_url: str, verify_ssl: bool, auth: LegacyAuth, logger=None):
         self.http_base_url = http_base_url.rstrip('/')
         self.verify_ssl = verify_ssl
         self.auth = auth
-        self.gql = gql
-        self.smart_cache = smart_cache
         self.logger = logger
         self._csrf: Optional[str] = None
         self._cookie_header: Optional[str] = None
@@ -292,18 +290,20 @@ class UnraidGraphQLIntegration:
         self.legacy_ctx: Optional[LegacyHTTPContext] = None
         if self.username and self.password:
             self.legacy_auth = LegacyAuth(self.http_base, self.username, self.password, verify_ssl, self.logger)
-            self.legacy_ctx = LegacyHTTPContext(self.http_base, self.verify_ssl, self.legacy_auth, self.gql, smart_cache=self.smart_cache, logger=self.logger)
+            self.legacy_ctx = LegacyHTTPContext(self.http_base, self.verify_ssl, self.legacy_auth, logger=self.logger)
 
         self._mqtt_cfg = mqtt_config
         self.mqtt: Optional[MQTTPublisher] = None
 
-        self.query_collectors: List[Any] = []
-        self.subscription_collectors: List[Any] = []
+        self.query_collectors: List[Any] = self._load_plugins('collectors', 'COLLECTOR', 'query collector', self._build_query_collector)
+        self.subscription_collectors: List[Any] = self._load_plugins(
+            'subscriptions', 'SUBSCRIPTION', 'subscription collector', lambda cls: cls(self.logger, self.scan_interval))
         self.legacy_channels: List[LegacyChannel] = []
-
-        self._load_query_collectors()
-        self._load_subscription_collectors()
-        self._load_legacy_channels()
+        if self.legacy_auth:
+            self.legacy_channels = self._load_plugins(
+                'legacy', 'CHANNEL', 'legacy channel', lambda cls: cls(self.logger, self.scan_interval))
+        else:
+            self.logger.info('Legacy channels disabled (no username/password).')
 
         self._query_tasks: List[asyncio.Task] = []
         self._subscription_tasks: List[asyncio.Task] = []
@@ -317,124 +317,50 @@ class UnraidGraphQLIntegration:
         self._offline_logged = False
         self._session_refresh_task: Optional[asyncio.Task] = None
 
-    def _load_query_collectors(self) -> None:
-        loaded = 0
-        try:
-            import app.collectors as collectors_pkg
-        except ImportError as e:
-            self.logger.error(f'Collectors package not found: {e}')
-            return
-
-        for _, module_name, ispkg in pkgutil.iter_modules(collectors_pkg.__path__):
+    def _load_plugins(self, package: str, attr: str, kind: str, build: Callable[[Any], Any]) -> List[Any]:
+        """
+        Import every module in app.<package> exposing <attr> (a class), skip disabled ones and instantiate
+        the rest with build(cls). Modules that fail to load still count as entity owners, so a transient
+        import problem never removes their entities.
+        """
+        instances: List[Any] = []
+        pkg = importlib.import_module(f'app.{package}')
+        for _, module_name, ispkg in pkgutil.iter_modules(pkg.__path__):
             if ispkg or module_name == 'base':
                 continue
-
-            full_module = f'{collectors_pkg.__name__}.{module_name}'
             try:
-                mod = importlib.import_module(full_module)
-                collector_cls = getattr(mod, 'COLLECTOR', None)
-                if collector_cls is None:
+                cls = getattr(importlib.import_module(f'app.{package}.{module_name}'), attr, None)
+                if cls is None:
                     continue
-                if getattr(collector_cls, 'name', None) in self._disabled_collectors:
-                    self.logger.info(f'Skipping disabled collector: {getattr(collector_cls, "name", module_name)}')
+                if cls.name in self._disabled_collectors:
+                    self.logger.info(f'Skipping disabled collector: {cls.name}')
                     continue
-
-                requires_legacy = getattr(collector_cls, 'requires_legacy_auth', False)
-                uses_smart = getattr(collector_cls, 'uses_smart_cache', False)
-                kwargs = {}
-
-                if requires_legacy and self.legacy_ctx:
-                    kwargs['legacy_ctx'] = self.legacy_ctx
-                if uses_smart:
-                    kwargs['smart_cache'] = self.smart_cache
-
-                instance = collector_cls(self.gql, self.logger, self.scan_interval, **kwargs)
-                self.query_collectors.append(instance)
+                instance = build(cls)
+                instances.append(instance)
                 self._entity_owners.add(instance.name)
-                loaded += 1
-                self.logger.info(f'Loaded query collector: {instance.name}')
+                self.logger.info(f'Loaded {kind}: {instance.name}')
             except Exception as e:
                 self._entity_owners.add(module_name)
-                self.logger.error(f'Failed to load collector {full_module}: {e}')
+                self.logger.error(f'Failed to load {kind} app.{package}.{module_name}: {e}')
+        return instances
 
-        if loaded == 0:
-            self.logger.warning('No query collectors loaded. Ensure app/collectors has modules and __init__.py.')
-
-    def _load_subscription_collectors(self) -> None:
-        loaded = 0
-        try:
-            import app.subscriptions as subs_pkg
-        except ImportError:
-            self.logger.info('No subscriptions package found (app/subscriptions). Skipping subscriptions.')
-            return
-
-        for _, module_name, ispkg in pkgutil.iter_modules(subs_pkg.__path__):
-            if ispkg:
-                continue
-
-            full_module = f'{subs_pkg.__name__}.{module_name}'
-            try:
-                mod = importlib.import_module(full_module)
-                subs_cls = getattr(mod, 'SUBSCRIPTION', None)
-                if subs_cls is None:
-                    continue
-                if getattr(subs_cls, 'name', None) in self._disabled_collectors:
-                    self.logger.info(f'Skipping disabled collector: {getattr(subs_cls, "name", module_name)}')
-                    continue
-
-                instance = subs_cls(self.logger, self.scan_interval)
-                self.subscription_collectors.append(instance)
-                self._entity_owners.add(instance.name)
-                loaded += 1
-                self.logger.info(f'Loaded subscription collector: {instance.name}')
-            except Exception as e:
-                self._entity_owners.add(module_name)
-                self.logger.error(f'Failed to load subscription {full_module}: {e}')
-
-        if loaded == 0:
-            self.logger.info('No subscription collectors found.')
-
-    def _load_legacy_channels(self) -> None:
-        loaded = 0
-        if not (self.username and self.password):
-            self.logger.info('Legacy channels disabled (no username/password).')
-            return
-
-        try:
-            import app.legacy as legacy_pkg
-        except ImportError:
-            self.logger.info('No legacy package found (app/legacy). Skipping legacy channels.')
-            return
-
-        for _, module_name, ispkg in pkgutil.iter_modules(legacy_pkg.__path__):
-            if ispkg:
-                continue
-
-            full_module = f'{legacy_pkg.__name__}.{module_name}'
-            try:
-                mod = importlib.import_module(full_module)
-                channel_cls = getattr(mod, 'CHANNEL', None)
-                if channel_cls is None:
-                    continue
-                if getattr(channel_cls, 'name', None) in self._disabled_collectors:
-                    self.logger.info(f'Skipping disabled collector: {getattr(channel_cls, "name", module_name)}')
-                    continue
-
-                instance = channel_cls(self.logger, self.scan_interval)
-                self.legacy_channels.append(instance)
-                self._entity_owners.add(instance.name)
-                loaded += 1
-                self.logger.info(f'Loaded legacy channel: {instance.name}')
-            except Exception as e:
-                self._entity_owners.add(module_name)
-                self.logger.error(f'Failed to load legacy channel {full_module}: {e}')
-
-        if loaded == 0:
-            self.logger.info('No legacy channels found.')
+    def _build_query_collector(self, cls) -> Any:
+        kwargs = {}
+        if getattr(cls, 'requires_legacy_auth', False) and self.legacy_ctx:
+            kwargs['legacy_ctx'] = self.legacy_ctx
+        if getattr(cls, 'uses_smart_cache', False):
+            kwargs['smart_cache'] = self.smart_cache
+        return cls(self.gql, self.logger, self.scan_interval, **kwargs)
 
     async def start(self) -> None:
         if self._availability_task is None:
             self._availability_task = asyncio.create_task(self._availability_loop())
+
+    async def aclose(self) -> None:
+        self._stop_all.set()
+        if self._started:
+            await self._stop_runtime()
+        await self.gql.aclose()
 
     async def _availability_loop(self) -> None:
         backoff = 5
@@ -537,6 +463,7 @@ class UnraidGraphQLIntegration:
                 auth=self.legacy_auth,
                 logger=self.logger,
             )
+            self._legacy_runner.start_keepalive(self.scan_interval)
             self._legacy_tasks.clear()
             for ch in self.legacy_channels:
                 task = asyncio.create_task(self._run_legacy_channel(ch))
@@ -562,7 +489,9 @@ class UnraidGraphQLIntegration:
         self._query_tasks.clear()
         self._subscription_tasks.clear()
         self._legacy_tasks.clear()
-        self._legacy_runner = None
+        if self._legacy_runner:
+            await self._legacy_runner.aclose()
+            self._legacy_runner = None
 
         if self._session_refresh_task:
             try:
@@ -627,119 +556,64 @@ class UnraidGraphQLIntegration:
                 pass
 
     async def _run_subscription_collector(self, collector) -> None:
-        base_interval = max(1, int(getattr(collector, 'interval', self.scan_interval)))
+        name = getattr(collector, 'name', '?')
+        interval = max(1, int(getattr(collector, 'interval', self.scan_interval)))
         backoff = 5
+
+        async def publish_event(event: Dict[str, Any]):
+            try:
+                self._publish_updates(collector, await collector.parse(event) or [])
+            except Exception as e:
+                if not self._stop_all.is_set():
+                    self.logger.error(f'Subscription collector "{name}" parse/publish error: {e}')
 
         while not self._stop_all.is_set():
             if not _GQL_WS_AVAILABLE:
                 self.logger.error('gql websockets transport not available; cannot run subscription collector')
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
-                continue
+                return
 
-            stop_local = asyncio.Event()
             event_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
-            unsupported: List[str] = []
-
-            async def publish_event(event: Dict[str, Any]):
-                try:
-                    updates = await collector.parse(event) or []
-                    self._publish_updates(collector, updates)
-                except Exception as e:
-                    if not self._stop_all.is_set():
-                        self.logger.error(f'Subscription collector "{getattr(collector, "name", "?")}" parse/publish error: {e}')
-
-            async def receiver_loop(session):
-                try:
-                    async for event in session.subscribe(gql(collector.subscription_query)):
-                        try:
-                            while True:
-                                event_queue.get_nowait()
-                                event_queue.task_done()
-                        except asyncio.QueueEmpty:
-                            pass
-                        await event_queue.put(event)
-                        if stop_local.is_set() or self._stop_all.is_set():
-                            break
-                except Exception as e:
-                    if 'Cannot query field' in str(e):
-                        unsupported.append(str(e))
-                    elif not (stop_local.is_set() or self._stop_all.is_set()):
-                        self.logger.error(f'Subscription collector "{getattr(collector, "name", "?")}" receiver failed: {e}')
-
-            async def publisher_loop():
-                while event_queue.empty() and not (stop_local.is_set() or self._stop_all.is_set()):
-                    await asyncio.sleep(0.05)
-                if stop_local.is_set() or self._stop_all.is_set():
-                    return
-
-                first_event = await event_queue.get()
-                await publish_event(first_event)
-                event_queue.task_done()
-
-                while not (stop_local.is_set() or self._stop_all.is_set()):
-                    try:
-                        await asyncio.wait_for(self._stop_all.wait(), timeout=base_interval)
-                        if self._stop_all.is_set():
-                            break
-                    except asyncio.TimeoutError:
-                        pass
-
-                    latest = None
-                    try:
-                        while True:
-                            latest = event_queue.get_nowait()
-                            event_queue.task_done()
-                    except asyncio.QueueEmpty:
-                        pass
-
-                    if latest is not None:
-                        await publish_event(latest)
-
+            unsupported = False
             try:
                 csrf = await self.gql.get_csrf_token() or ''
-                init_payload = {'x-csrf-token': csrf, 'x-api-key': self.api_key}
-
                 ssl_ctx = None
                 if self.ws_base.startswith('wss') and not self.verify_ssl:
                     ssl_ctx = ssl_mod._create_unverified_context()
-
                 transport = WebsocketsTransport(url=urljoin(self.ws_base + '/', 'graphql'),
-                                                init_payload=init_payload, ssl=ssl_ctx)
-                client = Client(transport=transport, fetch_schema_from_transport=False)
+                                                init_payload={'x-csrf-token': csrf, 'x-api-key': self.api_key}, ssl=ssl_ctx)
 
-                async with client as session:
-                    recv_task = asyncio.create_task(receiver_loop(session))
-                    pub_task = asyncio.create_task(publisher_loop())
-
-                    await recv_task
-                    stop_local.set()
+                async with Client(transport=transport, fetch_schema_from_transport=False) as session:
+                    pub_task = asyncio.create_task(publish_latest(event_queue, publish_event, interval, self._stop_all))
                     try:
-                        await asyncio.wait_for(pub_task, timeout=2)
-                    except asyncio.TimeoutError:
+                        async for event in session.subscribe(gql(collector.subscription_query)):
+                            put_latest(event_queue, event)
+                            if self._stop_all.is_set():
+                                break
+                    except Exception as e:
+                        if 'Cannot query field' not in str(e):
+                            raise
+                        unsupported = True
+                    finally:
                         pub_task.cancel()
+                        await asyncio.gather(pub_task, return_exceptions=True)
 
                 if unsupported:
                     # Older Unraid API without this subscription; legacy channels (if any) keep providing the data
-                    self.logger.warning(
-                        f'Subscription collector "{getattr(collector, "name", "?")}" is not supported by this '
-                        f'Unraid API version; disabled until restart'
-                    )
+                    self.logger.warning(f'Subscription collector "{name}" is not supported by this Unraid API version; '
+                                        f'disabled until reconnect')
                     return
-
                 if not self._stop_all.is_set():
-                    self.logger.error(f'Subscription collector "{getattr(collector, "name", "?")}" ended; retrying in {backoff}s')
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, 60)
+                    self.logger.error(f'Subscription collector "{name}" ended; retrying in {backoff}s')
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                if not self._stop_all.is_set():
-                    self.logger.error(f'Subscription collector "{getattr(collector, "name", "?")}" failed: {e}; retrying in {backoff}s')
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, 60)
-            finally:
-                stop_local.set()
+                if self._stop_all.is_set():
+                    break
+                self.logger.error(f'Subscription collector "{name}" failed: {e}; retrying in {backoff}s')
+
+            if not self._stop_all.is_set():
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
 
 
 async def main() -> None:
@@ -751,10 +625,7 @@ async def main() -> None:
         print('No unraid nodes defined in /data/config.yaml')
         return
 
-    if os.name == 'nt':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     integrators: List[UnraidGraphQLIntegration] = []
 
     for node_cfg in unraid_nodes:
@@ -766,31 +637,17 @@ async def main() -> None:
     await asyncio.gather(*(i.start() for i in integrators), return_exceptions=True)
 
     stop_event = asyncio.Event()
-
-    def trigger_stop(*_):
-        stop_event.set()
-
-    try:
-        signal.signal(signal.SIGINT, trigger_stop)
-    except Exception:
-        pass
-    try:
-        signal.signal(signal.SIGTERM, trigger_stop)
-    except Exception:
-        pass
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            # Windows: no loop signal handlers
+            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop_event.set))
 
     await stop_event.wait()
 
-    for i in integrators:
-        i._stop_all.set()
     try:
-        await asyncio.wait_for(
-            asyncio.gather(
-                *(i._stop_runtime() for i in integrators if i._started),
-                return_exceptions=True,
-            ),
-            timeout=35,
-        )
+        await asyncio.wait_for(asyncio.gather(*(i.aclose() for i in integrators), return_exceptions=True), timeout=35)
     except asyncio.TimeoutError:
         pass
 

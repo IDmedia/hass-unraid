@@ -1,12 +1,12 @@
 import os
+import asyncio
 import re
 import json
 import yaml
 import hashlib
 import logging
-import functools
 from lxml import etree
-from typing import Any, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict
 
 
 def load_file(path_to_file: str) -> Dict[str, Any]:
@@ -91,27 +91,6 @@ def normalize_keys_lower(obj: Any) -> Any:
     return obj
 
 
-def to_snake_case(name: str) -> str:
-    """
-    Convert camelCase/PascalCase/mixed to snake_case lower.
-    Examples: 'nameOrig' -> 'name_orig', 'splitLevel' -> 'split_level', 'URLValue' -> 'url_value'
-    """
-    s1 = re.sub(r'([A-Z]+)', r'_\1', name).strip('_')
-    s2 = re.sub(r'__+', r'_', s1)
-    return s2.lower()
-
-
-def normalize_keys_snake(obj: Any) -> Any:
-    """
-    Recursively convert dict keys to snake_case lower.
-    """
-    if isinstance(obj, dict):
-        return {to_snake_case(str(k)): normalize_keys_snake(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [normalize_keys_snake(v) for v in obj]
-    return obj
-
-
 def calculate_hash(data: Dict[str, Any]) -> str:
     return hashlib.md5(json.dumps(data, sort_keys=True).encode('utf-8')).hexdigest()
 
@@ -127,28 +106,30 @@ def setup_logger(name: str) -> logging.Logger:
     return logger
 
 
-def log_errors(context: str) -> Callable:
+def put_latest(queue: asyncio.Queue, item: Any) -> None:
+    """Replace whatever is waiting in a maxsize=1 queue with the newest item."""
+    try:
+        queue.get_nowait()
+    except asyncio.QueueEmpty:
+        pass
+    queue.put_nowait(item)
+
+
+async def publish_latest(queue: asyncio.Queue, handler: Callable[[Any], Awaitable[Any]], interval: int,
+                         stop_event: asyncio.Event) -> None:
     """
-    Decorator for async functions to catch and log errors with context.
+    Throttle a stream: handle the first item right away, then at most the newest item once per interval.
+    Runs until stop_event is set or the task is cancelled.
     """
-
-    def decorator(func: Callable):
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            logger = None
-            if args:
-                self_obj = args[0]
-                logger = getattr(self_obj, 'logger', None)
-            try:
-                return await func(*args, **kwargs)
-            except Exception as e:
-                if logger:
-                    logger.error(f'Error in "{context}": {type(e).__name__} - {e}')
-                    logger.exception(f'"{context}" failed with error')
-                else:
-                    print(f'Error in "{context}": {type(e).__name__} - {e}')
-                return None
-
-        return wrapper
-
-    return decorator
+    await handler(await queue.get())
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            latest = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            continue
+        await handler(latest)
