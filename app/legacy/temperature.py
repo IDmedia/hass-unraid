@@ -1,4 +1,3 @@
-import re
 from lxml import etree
 from typing import List
 from app.legacy.base import LegacyChannel
@@ -29,45 +28,29 @@ class TemperatureChannel(LegacyChannel):
                 continue
 
             if 'rpm' in device_value_raw.lower():
-                pretty_name = re.sub('fan', '', device_name, flags=re.IGNORECASE).strip()
-                try:
-                    rpm = int(float(device_value))
-                except Exception:
-                    rpm = 0
-                updates.append(
-                    EntityUpdate(
-                        sensor_type='sensor',
-                        payload={
-                            'name': f'Fan {pretty_name} Speed',
-                            'unit_of_measurement': 'RPM',
-                            'icon': 'mdi:fan',
-                            'state_class': 'measurement',
-                        },
-                        state=rpm,
-                        retain=False,
-                        expire_after=max(self.interval * 2, 60),
-                    )
+                # Fans are published by update1 (all fans, numbered); publishing them here too
+                # created a second entity for the same fan
+                continue
+
+            try:
+                temp = float(device_value)
+            except Exception:
+                temp = 0.0
+            updates.append(
+                EntityUpdate(
+                    sensor_type='sensor',
+                    payload={
+                        'name': f'{device_name} Temperature',
+                        'unit_of_measurement': '°C',
+                        'icon': 'mdi:thermometer',
+                        'state_class': 'measurement',
+                        'device_class': 'temperature',
+                    },
+                    state=temp,
+                    retain=False,
+                    expire_after=max(self.interval * 2, 60),
                 )
-            else:
-                try:
-                    temp = float(device_value)
-                except Exception:
-                    temp = 0.0
-                updates.append(
-                    EntityUpdate(
-                        sensor_type='sensor',
-                        payload={
-                            'name': f'{device_name} Temperature',
-                            'unit_of_measurement': '°C',
-                            'icon': 'mdi:thermometer',
-                            'state_class': 'measurement',
-                            'device_class': 'temperature',
-                        },
-                        state=temp,
-                        retain=False,
-                        expire_after=max(self.interval * 2, 60),
-                    )
-                )
+            )
 
         return updates
 

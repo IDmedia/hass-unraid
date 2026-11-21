@@ -514,7 +514,8 @@ class UnraidGraphQLIntegration:
 
         if not self.mqtt:
             self.mqtt = MQTTPublisher(self.name, self._mqtt_cfg, self.loop, self.logger, self.scan_interval,
-                                      tracker=self.entity_tracker, active_owners=self._entity_owners)
+                                      tracker=self.entity_tracker, active_owners=self._entity_owners,
+                                      fallback_owners={ch.name for ch in self.legacy_channels})
 
         await self._fetch_version()
 

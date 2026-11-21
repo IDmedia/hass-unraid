@@ -59,6 +59,10 @@ class EntityTracker:
     def get(self, sid: str) -> Optional[Dict[str, Any]]:
         return self.entities.get(sid)
 
+    def seen_within(self, sid: str, seconds: float) -> bool:
+        last = self._last_seen.get(sid)
+        return last is not None and time.monotonic() - last < seconds
+
     def mark_published(self, sid: str, owner: str, sensor_type: str, topic: str) -> None:
         record = {'owner': owner, 'type': sensor_type, 'topic': topic}
         if self.entities.get(sid) != record:

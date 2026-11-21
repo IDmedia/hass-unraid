@@ -18,6 +18,7 @@ class MQTTPublisher:
         scan_interval: int,
         tracker: Optional[EntityTracker] = None,
         active_owners: Optional[Set[str]] = None,
+        fallback_owners: Optional[Set[str]] = None,
     ):
         self.name = name
         self.loop = loop
@@ -33,6 +34,9 @@ class MQTTPublisher:
         self._availability_topic = f'unraid/{self._unraid_id}/connectivity/state'
         self.tracker = tracker
         self.active_owners: Set[str] = set(active_owners or set()) | {CONNECTIVITY_OWNER}
+        # Owners that only fill in when no other collector provides the same entity (legacy channels)
+        self.fallback_owners: Set[str] = set(fallback_owners or set())
+        self._conflicts_logged: Set[tuple] = set()
 
         self._client = MQTTClient(
             self.name,
@@ -217,6 +221,9 @@ class MQTTPublisher:
         if topic_suffix:
             unraid_sensor_id = f'{unraid_sensor_id}_{topic_suffix}'
 
+        if not self._may_publish(unraid_sensor_id, owner):
+            return unraid_sensor_id
+
         device = {
             'name': self.name,
             'identifiers': self._device_identifier,
@@ -279,6 +286,27 @@ class MQTTPublisher:
             )
 
         return unraid_sensor_id
+
+    def _may_publish(self, sid: str, owner: Optional[str]) -> bool:
+        """
+        Two collectors producing the same entity would overwrite each other's values. The collector that
+        currently owns it keeps it while it is still publishing; a legacy (fallback) owner always yields to a
+        GraphQL one. If the current owner stops publishing for the grace period, the other one takes over.
+        """
+        if not self.tracker or not owner:
+            return True
+        record = self.tracker.get(sid)
+        current = record.get('owner') if record else None
+        if current in (None, owner) or current not in self.active_owners:
+            return True
+        if not self.tracker.seen_within(sid, self.tracker.grace_seconds):
+            return True
+        if current in self.fallback_owners and owner not in self.fallback_owners:
+            return True
+        if (sid, owner) not in self._conflicts_logged:
+            self._conflicts_logged.add((sid, owner))
+            self.logger.info(f'Entity "{sid}" is provided by both "{current}" and "{owner}"; using "{current}"')
+        return False
 
     def _has_config_changed(self, sensor_key: str, cfg: Dict[str, Any]) -> bool:
         new_hash = calculate_hash(cfg)
