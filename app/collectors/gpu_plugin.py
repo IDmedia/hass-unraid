@@ -13,7 +13,7 @@ class GpuPluginCollector(QueryCollector):
     Flow:
       - Discover GPU map once by parsing /Dashboard for gpustat_statusm({...}).
       - Fetch live stats via /plugins/gpustat/gpustatusmulti.php?gpus=<json>.
-      - Publish per-GPU sensors and a summary entity.
+      - Publish per-GPU sensors; the Load sensor carries all raw plugin values as attributes.
 
     Requires legacy auth (Cookie). Uses LegacyHTTPContext implicitly through the provided legacy_ctx.
     """
@@ -86,6 +86,7 @@ class GpuPluginCollector(QueryCollector):
                     load_pct = int(float(str(util).replace('%', '').strip()))
                 except Exception:
                     load_pct = 0
+                valid_attrs = normalize_keys_lower({k: v for k, v in gpu_data.items() if is_valid(v)})
                 updates.append(
                     EntityUpdate(
                         sensor_type='sensor',
@@ -96,6 +97,7 @@ class GpuPluginCollector(QueryCollector):
                             'state_class': 'measurement',
                         },
                         state=load_pct,
+                        attributes=valid_attrs,
                         retain=False,
                         expire_after=max(self.interval * 2, 60),
                         unique_id_suffix=f'{gpu_id}_load',
@@ -192,30 +194,6 @@ class GpuPluginCollector(QueryCollector):
                         unique_id_suffix=f'{gpu_id}_temp',
                     )
                 )
-
-            if is_valid(util):
-                try:
-                    load_pct = int(float(str(util).replace('%', '').strip()))
-                    valid_attrs = {k: v for k, v in gpu_data.items() if is_valid(v)}
-                    valid_attrs = normalize_keys_lower(valid_attrs)
-                    updates.append(
-                        EntityUpdate(
-                            sensor_type='sensor',
-                            payload={
-                                'name': name,
-                                'icon': 'mdi:expansion-card',
-                                'unit_of_measurement': '%',
-                                'state_class': 'measurement',
-                            },
-                            state=load_pct,
-                            attributes=valid_attrs,
-                            retain=False,
-                            expire_after=max(self.interval * 2, 60),
-                            unique_id_suffix=f'{gpu_id}_summary',
-                        )
-                    )
-                except Exception:
-                    pass
 
         return updates
 
