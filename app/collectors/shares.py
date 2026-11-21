@@ -55,6 +55,13 @@ class SharesCollector(QueryCollector):
         shares = (data or {}).get('shares') or []
         updates: List[EntityUpdate] = []
 
+        # Forget legacy data for shares that no longer exist
+        current = {s.get('nameOrig') or s.get('name') for s in shares}
+        for cache in (self._legacy_cache, self._legacy_last_refresh):
+            for gone in [k for k in cache if k not in current]:
+                del cache[gone]
+        self._pending_first_refresh &= current
+
         for s in shares:
             name = s.get('name') or s.get('nameOrig') or 'unknown'
             share_nameorig = s.get('nameOrig') or s.get('name') or ''
@@ -80,25 +87,26 @@ class SharesCollector(QueryCollector):
                         f'{type(e).__name__}: {e}'
                     )
 
-            # Use data solely from the legacy cache
-            cached = self._legacy_cache.get(share_nameorig)
-            if cached is not None and isinstance(cached, tuple) and len(cached) == 2:
-                self._pending_first_refresh.discard(share_nameorig)
-                used_kb, free_kb = cached
-            else:
-                if share_nameorig not in self._pending_first_refresh:
-                    self.logger.warning(f"No legacy data available for share '{share_nameorig}', skipping...")
-                continue
-
-            size_kb = used_kb + free_kb
-            used_pct = int(round((used_kb / size_kb) * 100)) if size_kb > 0 else 0
-
             payload = {
                 'name': f'Share {str(name).title()} Usage',
                 'unit_of_measurement': '%',
                 'icon': 'mdi:folder-network',
                 'state_class': 'measurement',
             }
+
+            # Usage comes solely from the legacy cache
+            cached = self._legacy_cache.get(share_nameorig)
+            if not (isinstance(cached, tuple) and len(cached) == 2):
+                if share_nameorig not in self._pending_first_refresh:
+                    self.logger.warning(f"No legacy data available for share '{share_nameorig}', skipping...")
+                # The share exists but its usage could not be read (yet); keep the entity as it is
+                updates.append(EntityUpdate(sensor_type='sensor', payload=payload, state=None,
+                                            unique_id_suffix=share_nameorig, presence_only=True))
+                continue
+            self._pending_first_refresh.discard(share_nameorig)
+            used_kb, free_kb = cached
+            size_kb = used_kb + free_kb
+            used_pct = int(round((used_kb / size_kb) * 100)) if size_kb > 0 else 0
 
             attributes = normalize_keys_lower(s)
             attributes['used'] = used_kb
@@ -112,7 +120,7 @@ class SharesCollector(QueryCollector):
                     state=used_pct,
                     attributes=attributes,
                     retain=True,
-                    unique_id_suffix=share_nameorig or None,
+                    unique_id_suffix=share_nameorig,
                 )
             )
 

@@ -19,6 +19,8 @@ class EntityUpdate:
     device_overrides: Optional[Dict[str, Any]] = None
     unique_id_suffix: Optional[str] = None
     expire_after: Optional[int] = None  # Per entity
+    # Only report that the entity still exists (no data available right now); nothing is published
+    presence_only: bool = False
 
 
 class QueryCollector(Protocol):
@@ -26,7 +28,8 @@ class QueryCollector(Protocol):
     interval: int
     query: Optional[str]
     # True when parse() always returns the complete set of entities; entities missing from it
-    # are then removed from Home Assistant. fetch/parse must raise on failure instead of returning empty.
+    # are then marked unavailable (and removed after a week). fetch/parse must raise on failure instead of
+    # returning empty.
     tracks_removals: bool = False
 
     async def fetch(self) -> Dict[str, Any]:

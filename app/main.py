@@ -305,6 +305,10 @@ class UnraidGraphQLIntegration:
         else:
             self.logger.info('Legacy channels disabled (no username/password).')
 
+        for collector in self.query_collectors + self.subscription_collectors + self.legacy_channels:
+            for name, suffix in getattr(collector, 'static_entities', []):
+                self.entity_tracker.expect(f'{unraid_id}_{MQTTPublisher.topic_name(name, suffix)}', collector.name)
+
         self._query_tasks: List[asyncio.Task] = []
         self._subscription_tasks: List[asyncio.Task] = []
         self._legacy_tasks: List[asyncio.Task] = []
@@ -362,11 +366,19 @@ class UnraidGraphQLIntegration:
             await self._stop_runtime()
         await self.gql.aclose()
 
+    PROBE_FAILURES_BEFORE_STOP = 3
+
     async def _availability_loop(self) -> None:
         backoff = 5
+        failures = 0
 
         while not self._stop_all.is_set():
             available = await self._probe_unraid()
+            # A single failed probe (API restart, timeout) must not tear everything down
+            failures = 0 if available else failures + 1
+            if not available and self._started and failures < self.PROBE_FAILURES_BEFORE_STOP:
+                self.logger.info(f'Unraid API probe failed ({failures}/{self.PROBE_FAILURES_BEFORE_STOP}); keeping runtime')
+                available = True
             if available and not self._started:
                 self._offline_logged = False
                 self.logger.info('Unraid is available; starting runtime')
@@ -420,7 +432,7 @@ class UnraidGraphQLIntegration:
         """
         Light CSRF refresher while online. Never forces a re-login.
         """
-        while self._started and not self._stop_all.is_set():
+        while not self._stop_all.is_set():
             try:
                 if self.legacy_ctx:
                     await self.legacy_ctx.ensure_fresh_session(allow_relogin=False)
@@ -517,7 +529,7 @@ class UnraidGraphQLIntegration:
     def _publish_updates(self, collector, updates: List[Any]) -> None:
         """
         Publish a collector's updates. Collectors with tracks_removals=True report their complete set
-        every time, so entities they stop reporting are removed from Home Assistant.
+        every time, so entities they stop reporting are marked unavailable (and removed after a week).
         """
         if not self.mqtt:
             return

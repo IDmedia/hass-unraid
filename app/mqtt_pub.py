@@ -147,8 +147,14 @@ class MQTTPublisher:
             await asyncio.sleep(60)
             try:
                 if self.mqtt_connected:
-                    for sid in self.tracker.orphans(self.active_owners):
-                        self._remove_entity(sid, 'no longer provided by any loaded collector')
+                    newly_unavailable, to_remove = self.tracker.orphans(self.active_owners)
+                    for sid in newly_unavailable:
+                        self.logger.info(f'Entity "{sid}" is not provided by any collector; marking unavailable')
+                        self._set_entity_available(self.tracker.get(sid)['topic'], False)
+                    for sid in to_remove:
+                        owner = self.tracker.get(sid).get('owner')
+                        reason = f'collector "{owner}" is disabled' if owner else 'not provided by any collector for 7 days'
+                        self._remove_entity(sid, reason)
                 self.tracker.save()
             except Exception as e:
                 self.logger.exception(f'Error during entity sweep: {e}')
@@ -164,21 +170,32 @@ class MQTTPublisher:
             # Clear retained state/attributes so nothing lingers on the broker
             self._client.publish(f'unraid/{self._unraid_id}/{topic}/state', '', retain=True)
             self._client.publish(f'unraid/{self._unraid_id}/{topic}/attributes', '', retain=True)
+            self._client.publish(f'unraid/{self._unraid_id}/{topic}/availability', '', retain=True)
         self.parser_hashes.pop(sid, None)
         self.tracker.forget(sid)
 
+    def _set_entity_available(self, topic: str, available: bool) -> None:
+        self._client.publish(f'unraid/{self._unraid_id}/{topic}/availability', 'ON' if available else 'OFF', retain=True)
+
     def reconcile(self, owner: str, published_ids: Iterable[Optional[str]]) -> None:
         """
-        Called after a collector published its complete set of entities. Entities of that collector
-        that keep missing are removed from Home Assistant.
+        Called after a collector published its complete set of entities. Entities of that collector that
+        keep missing are marked unavailable, and only removed from Home Assistant once they have been gone
+        for EntityTracker.REMOVAL_SECONDS, so short outages never delete anything.
         """
         ids = list(published_ids)
         if not self.tracker or not self.mqtt_connected or None in ids:
             return
-        for sid in self.tracker.stale_in_snapshot(owner, ids):
-            self._remove_entity(sid, f'no longer reported by "{owner}"')
+        newly_unavailable, expired = self.tracker.missing_in_snapshot(owner, ids)
+        for sid in newly_unavailable:
+            self.logger.info(f'Entity "{sid}" is no longer reported by "{owner}"; marking unavailable')
+            self._set_entity_available(self.tracker.get(sid)['topic'], False)
+        for sid in expired:
+            self._remove_entity(sid, f'not reported by "{owner}" for {self.tracker.removal_seconds // 86400} days')
 
     def publish_update(self, upd, owner: Optional[str] = None) -> Optional[str]:
+        if upd.presence_only:
+            return self.entity_id(upd.payload['name'], upd.unique_id_suffix) if self.mqtt_connected else None
         return self.publish(
             payload=upd.payload,
             sensor_type=upd.sensor_type,
@@ -213,13 +230,8 @@ class MQTTPublisher:
             return None
 
         unraid_id = self._unraid_id
-        base_name = normalize_str(payload['name'])
-        topic_suffix = normalize_str(unique_id_suffix) if unique_id_suffix else None
-        topic_name = f'{base_name}_{topic_suffix}' if topic_suffix else base_name
-
-        unraid_sensor_id = f'{unraid_id}_{base_name}'
-        if topic_suffix:
-            unraid_sensor_id = f'{unraid_sensor_id}_{topic_suffix}'
+        topic_name = self.topic_name(payload['name'], unique_id_suffix)
+        unraid_sensor_id = f'{unraid_id}_{topic_name}'
 
         if not self._may_publish(unraid_sensor_id, owner):
             return unraid_sensor_id
@@ -245,9 +257,12 @@ class MQTTPublisher:
         if expire_after is not None:
             cfg['expire_after'] = expire_after
         if with_availability:
-            cfg['availability_topic'] = self._availability_topic
-            cfg['payload_available'] = 'ON'
-            cfg['payload_not_available'] = 'OFF'
+            # Unavailable when the integration is down (server-wide) or this entity is no longer reported
+            cfg['availability'] = [
+                {'topic': self._availability_topic, 'payload_available': 'ON', 'payload_not_available': 'OFF'},
+                {'topic': f'unraid/{unraid_id}/{topic_name}/availability', 'payload_available': 'ON', 'payload_not_available': 'OFF'},
+            ]
+            cfg['availability_mode'] = 'all'
         cfg.update({
             'attribution': 'Data provided by UNRAID',
             'unique_id': unraid_sensor_id,
@@ -263,8 +278,11 @@ class MQTTPublisher:
                 retain=True,
             )
 
-        if self.tracker and owner:
-            self.tracker.mark_published(unraid_sensor_id, owner, sensor_type, topic_name)
+        came_back = bool(self.tracker and owner and self.tracker.mark_published(unraid_sensor_id, owner, sensor_type, topic_name))
+        if with_availability and (is_new or came_back):
+            if came_back:
+                self.logger.info(f'Entity "{unraid_sensor_id}" is reported again; marking available')
+            self._set_entity_available(topic_name, True)
 
         state_retain = retain or is_new
         attrs_retain = retain or is_new
@@ -287,11 +305,20 @@ class MQTTPublisher:
 
         return unraid_sensor_id
 
+    @staticmethod
+    def topic_name(name: str, unique_id_suffix: Optional[str]) -> str:
+        base_name = normalize_str(name)
+        topic_suffix = normalize_str(unique_id_suffix) if unique_id_suffix else None
+        return f'{base_name}_{topic_suffix}' if topic_suffix else base_name
+
+    def entity_id(self, name: str, unique_id_suffix: Optional[str] = None) -> str:
+        return f'{self._unraid_id}_{self.topic_name(name, unique_id_suffix)}'
+
     def _may_publish(self, sid: str, owner: Optional[str]) -> bool:
         """
         Two collectors producing the same entity would overwrite each other's values. The collector that
         currently owns it keeps it while it is still publishing; a legacy (fallback) owner always yields to a
-        GraphQL one. If the current owner stops publishing for the grace period, the other one takes over.
+        GraphQL one. If the current owner stops publishing for HANDOVER_SECONDS, the other one takes over.
         """
         if not self.tracker or not owner:
             return True
@@ -299,7 +326,7 @@ class MQTTPublisher:
         current = record.get('owner') if record else None
         if current in (None, owner) or current not in self.active_owners:
             return True
-        if not self.tracker.seen_within(sid, self.tracker.grace_seconds):
+        if not self.tracker.seen_within(sid, self.tracker.HANDOVER_SECONDS):
             return True
         if current in self.fallback_owners and owner not in self.fallback_owners:
             return True

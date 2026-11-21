@@ -14,6 +14,7 @@ class NetworkSubscription(SubscriptionCollector):
     """
 
     name = 'network'
+    tracks_removals = True
     subscription_query = """
     subscription SystemMetricsNetwork {
       systemMetricsNetwork {

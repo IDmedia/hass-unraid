@@ -9,6 +9,8 @@ from app.collectors.base import EntityUpdate
 class ParityChannel(LegacyChannel):
     name = 'parity'
     channel = 'parity'
+    # Only published while a check runs; claimed up front so it is never mistaken for a leftover
+    static_entities = [('Parity Check', 'parity_check')]
     inactivity_timeout = 0
 
     def __init__(self, logger, interval: int):

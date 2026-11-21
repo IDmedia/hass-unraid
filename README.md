@@ -140,8 +140,9 @@ services:
 Entities follow your server without restarting the container:
 
 - New disks, shares, GPUs, network ports, sensors and UPS devices show up on the next update.
-- Ones that disappear from Unraid are removed from Home Assistant after about 10 minutes, so a brief hiccup never deletes anything.
-- Entities from a collector you disable are removed. So are leftovers from older versions, about an hour after start if nothing publishes them again.
+- Something that stops being reported (for example shares while the array is stopped) goes **unavailable** after a few missed updates. When it comes back, it's the same entity with its history and your customizations.
+- Only after it has been gone for **7 days** is it removed from Home Assistant. Short outages, reboots and maintenance never delete anything.
+- Entities from a collector you disable in `disabled_collectors` are removed right away. Leftovers from older versions that nothing publishes anymore go unavailable after an hour and are removed after 7 days.
 - All entities go unavailable while the container, MQTT or the Unraid server is down.
 
 Which entities belong to which collector is stored in `data/<server>_entities.json`.
