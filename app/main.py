@@ -639,6 +639,7 @@ class UnraidGraphQLIntegration:
 
             stop_local = asyncio.Event()
             event_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+            unsupported: List[str] = []
 
             async def publish_event(event: Dict[str, Any]):
                 try:
@@ -661,7 +662,9 @@ class UnraidGraphQLIntegration:
                         if stop_local.is_set() or self._stop_all.is_set():
                             break
                 except Exception as e:
-                    if not (stop_local.is_set() or self._stop_all.is_set()):
+                    if 'Cannot query field' in str(e):
+                        unsupported.append(str(e))
+                    elif not (stop_local.is_set() or self._stop_all.is_set()):
                         self.logger.error(f'Subscription collector "{getattr(collector, "name", "?")}" receiver failed: {e}')
 
             async def publisher_loop():
@@ -715,6 +718,14 @@ class UnraidGraphQLIntegration:
                         await asyncio.wait_for(pub_task, timeout=2)
                     except asyncio.TimeoutError:
                         pub_task.cancel()
+
+                if unsupported:
+                    # Older Unraid API without this subscription; legacy channels (if any) keep providing the data
+                    self.logger.warning(
+                        f'Subscription collector "{getattr(collector, "name", "?")}" is not supported by this '
+                        f'Unraid API version; disabled until restart'
+                    )
+                    return
 
                 if not self._stop_all.is_set():
                     self.logger.error(f'Subscription collector "{getattr(collector, "name", "?")}" ended; retrying in {backoff}s')

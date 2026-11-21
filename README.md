@@ -76,7 +76,7 @@ unraid:
 
     # Note: Advanced users and debugging only
     # Disable certain collectors
-    # Available: disks, shares, gpu_plugin, smart_data, cpu, apcups, parity, temperature, update1, update3, dashboard_ping
+    # Available: disks, shares, gpu_plugin, smart_data, cpu, cpu_telemetry, memory, network, apcups, parity, temperature, update1, update3, dashboard_ping
     # disabled_collectors:
     #   - shares
     #   - gpu_plugin
