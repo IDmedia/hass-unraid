@@ -2,6 +2,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol
 
 
+class IncompleteData(Exception):
+    """
+    Raised by fetch/parse when the source returned something unusable. The cycle is skipped without
+    publishing, so collectors with tracks_removals=True never mistake a bad response for "everything is gone".
+    """
+
+
 @dataclass
 class EntityUpdate:
     sensor_type: str  # 'sensor', 'binary_sensor', 'button', etc.
@@ -18,6 +25,9 @@ class QueryCollector(Protocol):
     name: str
     interval: int
     query: Optional[str]
+    # True when parse() always returns the complete set of entities; entities missing from it
+    # are then removed from Home Assistant. fetch/parse must raise on failure instead of returning empty.
+    tracks_removals: bool = False
 
     async def fetch(self) -> Dict[str, Any]:
         ...

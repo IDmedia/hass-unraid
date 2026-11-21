@@ -1,12 +1,13 @@
 import json
 from typing import List
 from app.legacy.base import LegacyChannel
-from app.collectors.base import EntityUpdate
+from app.collectors.base import EntityUpdate, IncompleteData
 
 
 class Update3Channel(LegacyChannel):
     name = 'update3'
     channel = 'update3'
+    tracks_removals = True
 
     def __init__(self, logger, interval: int):
         self.logger = logger
@@ -25,7 +26,9 @@ class Update3Channel(LegacyChannel):
         try:
             data = json.loads(msg_data)
         except Exception:
-            return updates
+            raise IncompleteData('update3 payload is not JSON')
+        if not isinstance(data, dict):
+            raise IncompleteData('unexpected update3 payload')
 
         ports = data.get('port') or []
         for entry in ports:

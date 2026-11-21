@@ -10,6 +10,7 @@ from hashlib import sha256
 from urllib.parse import urljoin
 from typing import Any, Dict, List, Optional, Tuple
 
+from .entity_tracker import EntityTracker
 from .gql_http import GraphQLClient
 from .legacy.base import LegacyChannel
 from .legacy_ws import LegacyAuth, LegacyWSRunner
@@ -282,6 +283,10 @@ class UnraidGraphQLIntegration:
 
         unraid_id = normalize_str(self.name)
         self.smart_cache = SmartCache(unraid_id, DATA_DIR, self.logger)
+        self.entity_tracker = EntityTracker(unraid_id, DATA_DIR, self.logger)
+        # Collectors whose entities we keep. Modules that fail to import count too, so a transient
+        # import problem never wipes their entities; disabled collectors are left out on purpose.
+        self._entity_owners: set = set()
 
         self.legacy_auth = None
         self.legacy_ctx: Optional[LegacyHTTPContext] = None
@@ -345,9 +350,11 @@ class UnraidGraphQLIntegration:
 
                 instance = collector_cls(self.gql, self.logger, self.scan_interval, **kwargs)
                 self.query_collectors.append(instance)
+                self._entity_owners.add(instance.name)
                 loaded += 1
                 self.logger.info(f'Loaded query collector: {instance.name}')
             except Exception as e:
+                self._entity_owners.add(module_name)
                 self.logger.error(f'Failed to load collector {full_module}: {e}')
 
         if loaded == 0:
@@ -377,9 +384,11 @@ class UnraidGraphQLIntegration:
 
                 instance = subs_cls(self.logger, self.scan_interval)
                 self.subscription_collectors.append(instance)
+                self._entity_owners.add(instance.name)
                 loaded += 1
                 self.logger.info(f'Loaded subscription collector: {instance.name}')
             except Exception as e:
+                self._entity_owners.add(module_name)
                 self.logger.error(f'Failed to load subscription {full_module}: {e}')
 
         if loaded == 0:
@@ -413,9 +422,11 @@ class UnraidGraphQLIntegration:
 
                 instance = channel_cls(self.logger, self.scan_interval)
                 self.legacy_channels.append(instance)
+                self._entity_owners.add(instance.name)
                 loaded += 1
                 self.logger.info(f'Loaded legacy channel: {instance.name}')
             except Exception as e:
+                self._entity_owners.add(module_name)
                 self.logger.error(f'Failed to load legacy channel {full_module}: {e}')
 
         if loaded == 0:
@@ -502,7 +513,8 @@ class UnraidGraphQLIntegration:
                 self.logger.error(f'Legacy session refresh failed: {e}')
 
         if not self.mqtt:
-            self.mqtt = MQTTPublisher(self.name, self._mqtt_cfg, self.loop, self.logger, self.scan_interval)
+            self.mqtt = MQTTPublisher(self.name, self._mqtt_cfg, self.loop, self.logger, self.scan_interval,
+                                      tracker=self.entity_tracker, active_owners=self._entity_owners)
 
         await self._fetch_version()
 
@@ -564,6 +576,7 @@ class UnraidGraphQLIntegration:
             except Exception:
                 pass
             self.mqtt = None
+        self.entity_tracker.save()
 
         if self.legacy_auth:
             try:
@@ -571,13 +584,24 @@ class UnraidGraphQLIntegration:
             except Exception:
                 pass
 
+    def _publish_updates(self, collector, updates: List[Any]) -> None:
+        """
+        Publish a collector's updates. Collectors with tracks_removals=True report their complete set
+        every time, so entities they stop reporting are removed from Home Assistant.
+        """
+        if not self.mqtt:
+            return
+        owner = collector.name
+        ids = [self.mqtt.publish_update(upd, owner) for upd in updates]
+        if getattr(collector, 'tracks_removals', False):
+            self.mqtt.reconcile(owner, ids)
+
     async def _run_legacy_channel(self, channel: LegacyChannel) -> None:
-        publish_fn = self.mqtt.publish if self.mqtt else (lambda **_kwargs: None)
         inactivity_timeout = getattr(channel, 'inactivity_timeout', None)
         await self._legacy_runner.run_channel(
             channel_name=channel.channel,
             parse_fn=channel.parse,
-            publish_fn=publish_fn,
+            handle_updates=lambda updates: self._publish_updates(channel, updates),
             interval_seconds=max(1, int(getattr(channel, 'interval', self.scan_interval))),
             stop_event=self._stop_all,
             inactivity_timeout=inactivity_timeout,
@@ -589,18 +613,7 @@ class UnraidGraphQLIntegration:
             try:
                 data = await collector.fetch()
                 updates: List[Any] = await collector.parse(data) or []
-                if self.mqtt:
-                    for upd in updates:
-                        self.mqtt.publish(
-                            payload=upd.payload,
-                            sensor_type=upd.sensor_type,
-                            state_value=upd.state,
-                            json_attributes=upd.attributes,
-                            retain=upd.retain,
-                            device_overrides=upd.device_overrides,
-                            unique_id_suffix=upd.unique_id_suffix,
-                            expire_after=upd.expire_after,
-                        )
+                self._publish_updates(collector, updates)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -629,18 +642,7 @@ class UnraidGraphQLIntegration:
             async def publish_event(event: Dict[str, Any]):
                 try:
                     updates = await collector.parse(event) or []
-                    if self.mqtt:
-                        for upd in updates:
-                            self.mqtt.publish(
-                                payload=upd.payload,
-                                sensor_type=upd.sensor_type,
-                                state_value=upd.state,
-                                json_attributes=upd.attributes,
-                                retain=upd.retain,
-                                device_overrides=upd.device_overrides,
-                                unique_id_suffix=upd.unique_id_suffix,
-                                expire_after=upd.expire_after,
-                            )
+                    self._publish_updates(collector, updates)
                 except Exception as e:
                     if not self._stop_all.is_set():
                         self.logger.error(f'Subscription collector "{getattr(collector, "name", "?")}" parse/publish error: {e}')

@@ -1,12 +1,13 @@
 import re
 from typing import List
 from app.legacy.base import LegacyChannel
-from app.collectors.base import EntityUpdate
+from app.collectors.base import EntityUpdate, IncompleteData
 
 
 class Update1Channel(LegacyChannel):
     name = 'update1'
     channel = 'update1'
+    tracks_removals = True
 
     def __init__(self, logger, interval: int):
         self.logger = logger
@@ -24,6 +25,8 @@ class Update1Channel(LegacyChannel):
 
         categories = ['RAM', 'Flash', 'Log', 'Docker']
         percents = re.findall(r'(\d+%)', msg_data)
+        if not percents:
+            raise IncompleteData('no usage percentages in update1 payload')
         for cat, pct in zip(categories, percents[:len(categories)]):
             try:
                 value = int(''.join(c for c in pct if c.isdigit()))

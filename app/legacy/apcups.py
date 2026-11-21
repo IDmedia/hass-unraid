@@ -4,12 +4,13 @@ import json
 import humanfriendly
 from typing import Any, Dict, List
 from app.legacy.base import LegacyChannel
-from app.collectors.base import EntityUpdate
+from app.collectors.base import EntityUpdate, IncompleteData
 
 
 class ApcUpsChannel(LegacyChannel):
     name = 'apcups'
     channel = 'apcups'
+    tracks_removals = True
     inactivity_timeout = 0
 
     def __init__(self, logger, interval: int):
@@ -43,10 +44,10 @@ class ApcUpsChannel(LegacyChannel):
             msg_data = msg_data.replace(r'\/', '/')
             parsed = json.loads(msg_data)
         except Exception:
-            return updates
+            raise IncompleteData('apcups payload is not JSON')
 
         if not isinstance(parsed, list) or len(parsed) < 7:
-            return updates
+            raise IncompleteData('unexpected apcups payload')
 
         def clean_html(value: str) -> str:
             return re.sub(r'<[^>]+>', '', html.unescape(str(value))).strip()

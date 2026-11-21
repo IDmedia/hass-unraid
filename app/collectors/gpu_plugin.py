@@ -1,9 +1,10 @@
 import re
 import json
+import time
 from lxml import etree
 from app.utils import normalize_keys_lower
 from typing import Any, Dict, List, Optional
-from .base import EntityUpdate, QueryCollector
+from .base import EntityUpdate, IncompleteData, QueryCollector
 
 
 class GpuPluginCollector(QueryCollector):
@@ -20,7 +21,9 @@ class GpuPluginCollector(QueryCollector):
 
     name = 'gpu_plugin'
     requires_legacy_auth = True
+    tracks_removals = True
     query = None  # not GraphQL-based
+    rediscover_period = 600  # seconds; picks up added/removed GPUs without a restart
 
     def __init__(self, gql_client, logger, interval: int, legacy_ctx: Optional[Any] = None):
         self.gql = gql_client
@@ -28,33 +31,35 @@ class GpuPluginCollector(QueryCollector):
         self.interval = int(interval)
         self.legacy_ctx = legacy_ctx
         self.gpus: Optional[Dict[str, Any]] = None
+        self._discovered_at = 0.0
 
     async def fetch(self) -> Dict[str, Any]:
         """
-        Returns plugin JSON data as a dict keyed by gpu_id.
+        Returns plugin JSON data as a dict keyed by gpu_id. Raises on failure so a bad response
+        is never mistaken for "no GPUs".
         """
         if not self.legacy_ctx:
-            self.logger.info('GPU plugin: legacy context missing; skipping')
             return {}
 
-        if self.gpus is None:
+        if self.gpus is None or time.monotonic() - self._discovered_at >= self.rediscover_period:
             await self._discover_gpus()
-            if not self.gpus:
-                return {}
-
-        try:
-            r = await self.legacy_ctx.http_get(
-                '/plugins/gpustat/gpustatusmulti.php',
-                params={'gpus': json.dumps(self.gpus)},
-                timeout=30,
-            )
-            if r.status_code != 200:
-                self.logger.warning(f'GPU plugin fetch failed: HTTP {r.status_code}')
-                return {}
-            return r.json()
-        except Exception as e:
-            self.logger.error(f'GPU plugin fetch error: {e}')
+        if not self.gpus:
             return {}
+
+        r = await self.legacy_ctx.http_get(
+            '/plugins/gpustat/gpustatusmulti.php',
+            params={'gpus': json.dumps(self.gpus)},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            raise IncompleteData(f'GPU plugin fetch failed: HTTP {r.status_code}')
+        try:
+            data = r.json()
+        except Exception:
+            raise IncompleteData('GPU plugin returned invalid JSON')
+        if not isinstance(data, dict):
+            raise IncompleteData('GPU plugin returned unexpected payload')
+        return data
 
     async def parse(self, data: Dict[str, Any]) -> List[EntityUpdate]:
         updates: List[EntityUpdate] = []
@@ -200,34 +205,28 @@ class GpuPluginCollector(QueryCollector):
     async def _discover_gpus(self) -> None:
         """
         Fetch /Dashboard and parse gpustat_statusm(...) to discover GPUs.
+        No gpustat script on the page means no GPUs (or the plugin is not installed).
         """
-        if not self.legacy_ctx:
-            return
+        r = await self.legacy_ctx.http_get('/Dashboard', timeout=30)
+        if r.status_code != 200 or self.legacy_ctx._is_login_response(r):
+            raise IncompleteData(f'GPU discovery failed: HTTP {r.status_code}')
 
-        try:
-            r = await self.legacy_ctx.http_get('/Dashboard', timeout=30)
-            if r.status_code != 200:
-                self.logger.warning(f'GPU discovery failed: HTTP {r.status_code}')
-                return
-
-            tree = etree.HTML(r.text)
-            script_nodes = tree.xpath('.//script[contains(text(), "gpustat_statusm")]')
-            if not script_nodes:
-                return
-
+        gpus: Dict[str, Any] = {}
+        tree = etree.HTML(r.text or '')
+        script_nodes = tree.xpath('.//script[contains(text(), "gpustat_statusm")]') if tree is not None else []
+        if script_nodes:
             script_text = script_nodes[0].text or ''
             m = re.search(r'gpustat_statusm\((\{.+?\})\)', script_text, re.DOTALL)
             if not m:
-                self.logger.info('GPU plugin discovery: unable to match gpustat_statusm JSON')
-                return
+                raise IncompleteData('GPU discovery: unable to match gpustat_statusm JSON')
+            parsed = json.loads(m.group(1))
+            if isinstance(parsed, dict):
+                gpus = parsed
 
-            gpus_json = m.group(1)
-            gpus_obj = json.loads(gpus_json)
-            if isinstance(gpus_obj, dict) and gpus_obj:
-                self.gpus = gpus_obj
-                self.logger.info('GPU plugin: GPUs discovered')
-        except Exception as e:
-            self.logger.error(f'GPU discovery error: {e}')
+        if gpus != self.gpus:
+            self.logger.info(f'GPU plugin: {len(gpus)} GPU(s) discovered')
+        self.gpus = gpus
+        self._discovered_at = time.monotonic()
 
 
 COLLECTOR = GpuPluginCollector

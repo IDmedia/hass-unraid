@@ -2,19 +2,22 @@ import re
 from lxml import etree
 from typing import List
 from app.legacy.base import LegacyChannel
-from app.collectors.base import EntityUpdate
+from app.collectors.base import EntityUpdate, IncompleteData
 
 
 class TemperatureChannel(LegacyChannel):
     name = 'temperature'
     channel = 'temperature'
+    tracks_removals = True
 
     def __init__(self, logger, interval: int):
         self.logger = logger
         self.interval = int(interval)
 
     async def parse(self, msg_data: str) -> List[EntityUpdate]:
-        tree = etree.HTML(msg_data)
+        tree = etree.HTML(msg_data) if msg_data and msg_data.strip() else None
+        if tree is None:
+            raise IncompleteData('empty temperature payload')
         sensors = tree.xpath('.//span[@title]')
         updates: List[EntityUpdate] = []
 

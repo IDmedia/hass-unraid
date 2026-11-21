@@ -135,10 +135,21 @@ services:
   If nothing shows up, check the container logs: `docker logs hass-unraid`.
 - **Advanced:** You can disable individual data collectors per server using `disabled_collectors` in your `config.yaml`. This is intended for advanced users and debugging. See the config example above for available collector names.
 
+### Added and removed entities
+
+Entities follow your server without restarting the container:
+
+- New disks, shares, GPUs, network ports, sensors and UPS devices show up on the next update.
+- Ones that disappear from Unraid are removed from Home Assistant after about 10 minutes, so a brief hiccup never deletes anything.
+- Entities from a collector you disable are removed. So are leftovers from older versions, about an hour after start if nothing publishes them again.
+- All entities go unavailable while the container, MQTT or the Unraid server is down.
+
+Which entities belong to which collector is stored in `data/<server>_entities.json`.
+
 
 ## Updating
 
-It’s recommended to delete the MQTT device this integration creates before updating, as some entities may have been renamed or removed between versions. Then restart the container once.
+Renamed or removed entities are cleaned up automatically (see above). If you still see stale entities, you can delete the MQTT device this integration creates and restart the container once.
 
 Steps:
 1. In Home Assistant, go to Settings → Devices & Services → MQTT.

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 class DisksCollector(QueryCollector):
     name = 'disks'
+    tracks_removals = True
     uses_smart_cache = True  # loader will pass smart_cache
     query = """
     query Array {

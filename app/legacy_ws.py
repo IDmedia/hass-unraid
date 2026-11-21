@@ -5,6 +5,7 @@ from hashlib import sha256
 from urllib.parse import urljoin
 from http.cookies import SimpleCookie
 from typing import Callable, List, Optional, Tuple
+from app.collectors.base import IncompleteData
 
 
 def _resolve_ws_connect():
@@ -130,7 +131,7 @@ class LegacyWSRunner:
         self,
         channel_name: str,
         parse_fn: Callable[[str], asyncio.Future],
-        publish_fn: Callable,
+        handle_updates: Callable,
         interval_seconds: int,
         stop_event: asyncio.Event,
         inactivity_timeout: Optional[int] = None,
@@ -172,17 +173,9 @@ class LegacyWSRunner:
             async def publish_updates(msg_data: str):
                 try:
                     updates = await parse_fn(msg_data) or []
-                    for upd in updates:
-                        publish_fn(
-                            payload=upd.payload,
-                            sensor_type=upd.sensor_type,
-                            state_value=upd.state,
-                            json_attributes=upd.attributes,
-                            retain=upd.retain,
-                            device_overrides=upd.device_overrides,
-                            unique_id_suffix=upd.unique_id_suffix,
-                            expire_after=upd.expire_after,
-                        )
+                    handle_updates(updates)
+                except IncompleteData as e:
+                    self.logger.debug(f'Legacy WS "{channel_name}" message skipped: {e}')
                 except Exception as e:
                     self.logger.error(f'Legacy WS "{channel_name}" publish failed: {e}')
 
