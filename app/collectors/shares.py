@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 class SharesCollector(QueryCollector):
     name = 'shares'
     tracks_removals = True
+    inventory = True
     requires_legacy_auth = True
 
     query = """

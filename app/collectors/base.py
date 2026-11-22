@@ -31,6 +31,11 @@ class QueryCollector(Protocol):
     # are then marked unavailable (and removed after a week). fetch/parse must raise on failure instead of
     # returning empty.
     tracks_removals: bool = False
+    # Inventory entities (disks, shares) keep their last state and attributes while the server is down, and
+    # get present: false instead of going unavailable when they are missing. missing_state replaces the state
+    # of a missing entity (None keeps the last one).
+    inventory: bool = False
+    missing_state: Any = None
 
     async def fetch(self) -> Dict[str, Any]:
         ...

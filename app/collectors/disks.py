@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional, Tuple
 class DisksCollector(QueryCollector):
     name = 'disks'
     tracks_removals = True
+    inventory = True
+    missing_state = 0  # A missing disk shows like a spun-down one
     uses_smart_cache = True  # loader will pass smart_cache
     query = """
     query Array {

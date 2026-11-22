@@ -1,5 +1,6 @@
 import json
 import asyncio
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional, Set
 from gmqtt import Client as MQTTClient, Message
 from .entity_tracker import EntityTracker
@@ -19,6 +20,7 @@ class MQTTPublisher:
         tracker: Optional[EntityTracker] = None,
         active_owners: Optional[Set[str]] = None,
         fallback_owners: Optional[Set[str]] = None,
+        inventory_owners: Optional[Dict[str, Any]] = None,
     ):
         self.name = name
         self.loop = loop
@@ -37,6 +39,12 @@ class MQTTPublisher:
         # Owners that only fill in when no other collector provides the same entity (legacy channels)
         self.fallback_owners: Set[str] = set(fallback_owners or set())
         self._conflicts_logged: Set[tuple] = set()
+        # Owners whose entities are inventory (disks, shares): they keep their last state and attributes
+        # while the server or this container is down, and go "present: false" instead of unavailable
+        # when Unraid stops reporting them. Value: state to publish when missing (None keeps the last state).
+        self.inventory_owners: Dict[str, Any] = dict(inventory_owners or {})
+        # Retained attribute topics being read back to mark an inventory entity missing: topic -> sid
+        self._pending_missing: Dict[str, str] = {}
 
         self._client = MQTTClient(
             self.name,
@@ -86,6 +94,8 @@ class MQTTPublisher:
         if self.tracker:
             # Retained discovery configs tell us which entities already exist in Home Assistant
             self._client.subscribe('homeassistant/+/+/config', qos=0)
+            for topic in self._pending_missing:
+                self._client.subscribe(topic, qos=0)
 
     def _on_disconnect(self, client, packet, exc=None) -> None:
         level = self.logger.info if self._stopping else self.logger.error
@@ -98,6 +108,9 @@ class MQTTPublisher:
 
     def _on_message(self, client, topic, payload, qos, properties) -> None:
         if not self.tracker:
+            return
+        if topic in self._pending_missing:
+            self._publish_missing_attributes(topic, payload)
             return
         parts = topic.split('/')
         if len(parts) != 4 or parts[0] != 'homeassistant' or parts[3] != 'config':
@@ -150,7 +163,7 @@ class MQTTPublisher:
                     newly_unavailable, to_remove = self.tracker.orphans(self.active_owners)
                     for sid in newly_unavailable:
                         self.logger.info(f'Entity "{sid}" is not provided by any collector; marking unavailable')
-                        self._set_entity_available(self.tracker.get(sid)['topic'], False)
+                        self._mark_missing(sid)
                     for sid in to_remove:
                         owner = self.tracker.get(sid).get('owner')
                         reason = f'collector "{owner}" is disabled' if owner else 'not provided by any collector for 7 days'
@@ -177,19 +190,59 @@ class MQTTPublisher:
     def _set_entity_available(self, topic: str, available: bool) -> None:
         self._client.publish(f'unraid/{self._unraid_id}/{topic}/availability', 'ON' if available else 'OFF', retain=True)
 
+    def _mark_missing(self, sid: str) -> None:
+        """
+        Unavailable hides all attributes in Home Assistant. Inventory entities stay readable instead: their
+        retained attributes are read back from the broker and republished with present: false.
+        """
+        record = self.tracker.get(sid) or {}
+        topic = record.get('topic')
+        if not topic:
+            return
+        owner = record.get('owner')
+        if owner not in self.inventory_owners:
+            self._set_entity_available(topic, False)
+            return
+        missing_state = self.inventory_owners[owner]
+        if missing_state is not None:
+            self._client.publish(f'unraid/{self._unraid_id}/{topic}/state', str(missing_state), retain=True)
+        attributes_topic = f'unraid/{self._unraid_id}/{topic}/attributes'
+        self._pending_missing[attributes_topic] = sid
+        self._client.subscribe(attributes_topic, qos=0)
+
+    def _publish_missing_attributes(self, topic: str, payload: Any) -> None:
+        sid = self._pending_missing.pop(topic)
+        try:
+            self._client.unsubscribe(topic)
+        except Exception:
+            pass
+        record = self.tracker.get(sid) or {}
+        if not record.get('missing_since'):
+            return  # Reported again in the meantime
+        try:
+            attrs = json.loads(payload) if payload else {}
+        except Exception:
+            attrs = {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+        attrs['present'] = False
+        attrs['missing_since'] = datetime.fromtimestamp(float(record['missing_since']), timezone.utc).isoformat(timespec='seconds')
+        self._client.publish(topic, json.dumps(attrs), retain=True)
+
     def reconcile(self, owner: str, published_ids: Iterable[Optional[str]]) -> None:
         """
         Called after a collector published its complete set of entities. Entities of that collector that
-        keep missing are marked unavailable, and only removed from Home Assistant once they have been gone
-        for EntityTracker.REMOVAL_SECONDS, so short outages never delete anything.
+        keep missing are marked unavailable (inventory: present: false), and only removed from Home Assistant
+        once they have been gone for EntityTracker.REMOVAL_SECONDS, so short outages never delete anything.
         """
         ids = list(published_ids)
         if not self.tracker or not self.mqtt_connected or None in ids:
             return
         newly_unavailable, expired = self.tracker.missing_in_snapshot(owner, ids)
         for sid in newly_unavailable:
-            self.logger.info(f'Entity "{sid}" is no longer reported by "{owner}"; marking unavailable')
-            self._set_entity_available(self.tracker.get(sid)['topic'], False)
+            kind = 'marking as not present' if owner in self.inventory_owners else 'marking unavailable'
+            self.logger.info(f'Entity "{sid}" is no longer reported by "{owner}"; {kind}')
+            self._mark_missing(sid)
         for sid in expired:
             self._remove_entity(sid, f'not reported by "{owner}" for {self.tracker.removal_seconds // 86400} days')
 
@@ -256,6 +309,8 @@ class MQTTPublisher:
             cfg['command_topic'] = f'unraid/{unraid_id}/{topic_name}/commands'
         if expire_after is not None:
             cfg['expire_after'] = expire_after
+        inventory = owner in self.inventory_owners
+        with_availability = with_availability and not inventory
         if with_availability:
             # Unavailable when the integration is down (server-wide) or this entity is no longer reported
             cfg['availability'] = [
@@ -279,10 +334,13 @@ class MQTTPublisher:
             )
 
         came_back = bool(self.tracker and owner and self.tracker.mark_published(unraid_sensor_id, owner, sensor_type, topic_name))
+        if came_back:
+            self.logger.info(f'Entity "{unraid_sensor_id}" is reported again')
         if with_availability and (is_new or came_back):
-            if came_back:
-                self.logger.info(f'Entity "{unraid_sensor_id}" is reported again; marking available')
             self._set_entity_available(topic_name, True)
+        elif inventory and is_new:
+            # Inventory entities have no availability topic; drop one left over from earlier versions
+            self._client.publish(f'unraid/{unraid_id}/{topic_name}/availability', '', retain=True)
 
         state_retain = retain or is_new
         attrs_retain = retain or is_new

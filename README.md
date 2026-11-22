@@ -140,10 +140,11 @@ services:
 Entities follow your server without restarting the container:
 
 - New disks, shares, GPUs, network ports, sensors and UPS devices show up on the next update.
-- Something that stops being reported (for example shares while the array is stopped) goes **unavailable** after a few missed updates. When it comes back, it's the same entity with its history and your customizations.
-- Only after it has been gone for **7 days** is it removed from Home Assistant. Short outages, reboots and maintenance never delete anything.
-- Entities from a collector you disable in `disabled_collectors` are removed right away. Leftovers from older versions that nothing publishes anymore go unavailable after an hour and are removed after 7 days.
-- All entities go unavailable while the container, MQTT or the Unraid server is down.
+- **Live readings** (CPU, RAM, network, temperatures, fans, GPU, UPS, parity) go unavailable while the container, MQTT or the Unraid server is down.
+- **Disks and shares are an inventory**: they keep their last state and all attributes while the server or container is down, so you can still look up serial numbers, sizes, SMART data and share usage. Use the `Connectivity` sensor to see whether the server is online.
+- Something Unraid stops reporting while it is running (a removed disk, a deleted share) goes **unavailable** after a few missed updates. Disks and shares stay readable instead and get the attributes `present: false` and `missing_since` (a missing disk shows 0 °C, like a spun-down one). When it comes back, it's the same entity with its history and your customizations.
+- Only after it has been gone for **7 days** is it removed from Home Assistant. Short outages, reboots, maintenance and a powered-off server never delete anything.
+- Entities from a collector you disable in `disabled_collectors` are removed right away. Leftovers from older versions that nothing publishes anymore are removed after 7 days.
 
 Which entities belong to which collector is stored in `data/<server>_entities.json`.
 

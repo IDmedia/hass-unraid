@@ -453,7 +453,9 @@ class UnraidGraphQLIntegration:
         if not self.mqtt:
             self.mqtt = MQTTPublisher(self.name, self._mqtt_cfg, self.loop, self.logger, self.scan_interval,
                                       tracker=self.entity_tracker, active_owners=self._entity_owners,
-                                      fallback_owners={ch.name for ch in self.legacy_channels})
+                                      fallback_owners={ch.name for ch in self.legacy_channels},
+                                      inventory_owners={c.name: getattr(c, 'missing_state', None)
+                                                        for c in self.query_collectors if getattr(c, 'inventory', False)})
 
         await self._fetch_version()
 

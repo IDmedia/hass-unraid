@@ -15,9 +15,10 @@ class EntityTracker:
     (e.g. left over from an older version).
 
     Lifecycle of an entity owned by a snapshot collector (one that reports its complete set every cycle):
-      - Missing from MISSES_BEFORE_UNAVAILABLE consecutive snapshots: marked unavailable in Home Assistant.
+      - Missing from MISSES_BEFORE_UNAVAILABLE consecutive snapshots: marked unavailable in Home Assistant
+        (inventory entities such as disks and shares keep their data and get present: false instead).
         Short outages (array stopped, driver reload, service restart) never go further than this.
-      - Reported again: available again, nothing lost.
+      - Reported again: available (present) again, nothing lost.
       - Still missing after removal_seconds (wall clock, survives restarts): removed from Home Assistant.
 
     Other cleanup:
